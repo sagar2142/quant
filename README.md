@@ -28,8 +28,18 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 ## Daily commands
 
 ```powershell
-# Ingest NSE sessions (idempotent — safe to re-run and safe to interrupt)
-.\.venv\Scripts\python.exe -m apps.cli.ingest_nse --start 2024-01-01 --end 2024-03-31
+# Ingest NSE sessions. Sessions already in the panel are skipped, so this is
+# safe to re-run and safe to interrupt — a multi-year backfill resumes for free.
+.\.venv\Scripts\python.exe -m apps.cli.ingest_nse --start 2019-01-01
+
+# Backtest the ingested panel (corporate actions on by default)
+.\.venv\Scripts\python.exe -m apps.cli.backtest --strategy momentum --top 30
+
+# The validation gauntlet. Expect rejection — that is the system working.
+.\.venv\Scripts\python.exe -m apps.cli.validate --top 30
+
+# One paper trading cycle. Run it once per session, after the ingest.
+.\.venv\Scripts\python.exe -m apps.cli.paper --top 30
 
 # Data quality report; exits non-zero on any CRITICAL finding
 .\.venv\Scripts\python.exe -m apps.cli.quality
@@ -82,6 +92,11 @@ you about a number, it is `Decimal`. A lint rejects `float` anywhere under
 real publication lag. If they were equal, a strategy could act on a bar's close
 at the instant of that close, which no live system can do.
 
+**4. A held name that stops trading keeps its last traded mark.** Suspensions,
+renames and delistings happen mid-backtest. Valuing such a position at cost
+basis instead silently erases its unrealised P&L from the equity curve — an
+error that produces a plausible curve rather than an exception.
+
 ---
 
 ## Status
@@ -89,7 +104,7 @@ at the instant of that close, which no live system can do.
 | Milestone | Machinery | Gate |
 |---|---|---|
 | M1 — foundation, enforcement, core domain, NSE data | ✅ | ✅ met |
-| M2 — point-in-time data, corporate actions, universes | ✅ | ✅ met (68.4% real turnover 2019→2024) |
+| M2 — point-in-time data, corporate actions, universes | ✅ | ✅ met (1,871 continuous NSE sessions, 2019→2026) |
 | M3–M4 — backtester, cost engine, accounting | ✅ | ✅ met (all four) |
 | M5 — math library, DSR/PBO, 12-check gauntlet | ✅ | ✅ met |
 | M6–M7 — strategy families, hypothesis registry | ✅ | ⏳ needs your research |
@@ -104,7 +119,9 @@ by writing code:
 
 - **M6–M7** wants 15 hypotheses tested with ≥90% rejected. That is research,
   and it needs economic mechanisms you actually believe.
-- **M9** wants 6+ weeks of continuous paper trading. Calendar time.
+- **M9** wants 6+ weeks of continuous paper trading. Calendar time. The loop
+  itself is built and runs free: see `ops/deploy/github_actions_paper.yml` for
+  the scheduled job, one cycle per session.
 - **M11** wants human attestations — legal advice, tax position, tested kill
   switch. Run `python -m apps.cli.readiness` to see the list.
 

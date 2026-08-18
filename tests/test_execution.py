@@ -21,7 +21,7 @@ from engine.accounting import Fill, Portfolio
 from engine.costs.model import CostBreakdown
 from ops.alerts import Alert, AlertRouter, ConsoleSink, Severity, TelegramSink
 from trading.execution.broker import BrokerError, BrokerPosition, PaperBroker
-from trading.execution.orders import IllegalTransitionError, Order, TradingMode
+from trading.execution.orders import IllegalTransitionError, Order, OrderTransition, TradingMode
 from trading.reconcile.positions import BreakKind, reconcile_positions
 
 A = InstrumentId("NSE:A")
@@ -157,6 +157,26 @@ class TestPartialFills:
         with pytest.raises(ValueError, match="positive"):
             o.apply_fill(Decimal(0), Decimal(100))
 
+    @pytest.mark.parametrize("price", [Decimal(0), Decimal(-1)])
+    def test_non_positive_fill_price_rejected(self, price):
+        """A zero-price fill would divide the weighted average by a free trade
+        and corrupt cost basis permanently."""
+        o = order()
+        o.transition(OrderState.RISK_CHECKED)
+        o.transition(OrderState.SUBMITTED)
+        with pytest.raises(ValueError, match="fill price must be positive"):
+            o.apply_fill(Decimal(10), price)
+
+    def test_supplied_history_is_not_overwritten(self):
+        """Reconstructing an order from the database must keep its real
+        history, not stamp a fresh CREATED over it."""
+        existing = [
+            OrderTransition(None, OrderState.CREATED, T0, "created"),
+            OrderTransition(OrderState.CREATED, OrderState.RISK_CHECKED, T0, "checked"),
+        ]
+        rebuilt = order(history=existing, state=OrderState.RISK_CHECKED)
+        assert rebuilt.history == existing
+
 
 class TestUnknownState:
     """The load-bearing state (§19)."""
@@ -255,6 +275,90 @@ class TestPaperBroker:
         assert PaperBroker(INSTRUMENTS).mode is TradingMode.PAPER
         assert not TradingMode.PAPER.touches_real_money
         assert TradingMode.LIVE.touches_real_money
+
+    def test_submission_walks_the_real_state_machine(self):
+        """Paper must exercise the lifecycle live depends on (§19, §M9).
+
+        A simulator that fills an order while leaving it in CREATED means six
+        weeks of paper trading prove nothing about the state machine — and the
+        first live order takes an untested path.
+        """
+        submitted = order()
+        broker = PaperBroker(INSTRUMENTS)
+        broker_id = broker.submit(submitted, Decimal(500))
+        assert submitted.state is OrderState.ACKNOWLEDGED
+        assert submitted.broker_order_id == broker_id
+        assert [t.to_state for t in submitted.history] == [
+            OrderState.CREATED,
+            OrderState.RISK_CHECKED,
+            OrderState.SUBMITTED,
+            OrderState.ACKNOWLEDGED,
+        ]
+
+    def test_resubmitting_does_not_double_transition(self):
+        """A retry must not walk an already-acknowledged order through the
+        machine again — that would raise on an illegal transition and turn a
+        harmless duplicate into a crash mid-rebalance."""
+        broker = PaperBroker(INSTRUMENTS)
+        retried = order()
+        broker.submit(retried, Decimal(500))
+        broker.submit(retried, Decimal(500))
+        assert retried.state is OrderState.ACKNOWLEDGED
+        assert [t.to_state for t in retried.history].count(OrderState.ACKNOWLEDGED) == 1
+
+    def test_reducing_a_position_keeps_the_entry_price(self):
+        """Selling half does not re-average the remainder.
+
+        The remaining shares were bought at the original average; moving it on
+        an exit would misstate cost basis, and therefore realised P&L, for the
+        rest of the position's life.
+        """
+        broker = PaperBroker(INSTRUMENTS, slippage_bps=Decimal(0))
+        broker.submit(order(quantity=Decimal(200)), Decimal(500))
+        broker.submit(order(quantity=Decimal(50), side=Side.SELL), Decimal(900))
+        position = broker.positions()[0]
+        assert position.quantity == 150
+        assert position.average_price == Decimal(500)
+
+    def test_flipping_through_zero_opens_at_the_new_price(self):
+        broker = PaperBroker(INSTRUMENTS, slippage_bps=Decimal(0))
+        broker.submit(order(quantity=Decimal(100), side=Side.BUY), Decimal(500))
+        broker.submit(order(quantity=Decimal(150), side=Side.SELL), Decimal(600))
+        position = broker.positions()[0]
+        assert position.quantity == -50
+
+    def test_cancel_marks_the_order_cancelled(self):
+        broker = PaperBroker(INSTRUMENTS)
+        pending = order()
+        broker_id = broker.submit(pending, Decimal(500))
+        assert pending.state is OrderState.ACKNOWLEDGED
+        broker.cancel(broker_id)
+        assert pending.state is OrderState.CANCELLED
+
+    def test_cancelling_twice_is_refused(self):
+        """A terminal order cannot be cancelled again. Tolerating it would mean
+        the state machine has stopped describing reality (§19)."""
+        broker = PaperBroker(INSTRUMENTS)
+        broker_id = broker.submit(order(), Decimal(500))
+        broker.cancel(broker_id)
+        with pytest.raises(BrokerError, match="already CANCELLED"):
+            broker.cancel(broker_id)
+
+    def test_an_unrecognised_marker_returns_everything(self):
+        """Fail safe, not silent: a marker from a different broker session must
+        not cause fills to be skipped. Replaying a known fill is caught by the
+        order state machine; skipping one is invisible.
+        """
+        broker = PaperBroker(INSTRUMENTS)
+        broker.submit(order(), Decimal(500))
+        broker.submit(order(), Decimal(510))
+        assert len(broker.fills_since("pf-does-not-exist")) == 2
+
+    def test_injected_position_is_visible_to_reconciliation(self):
+        """The hook that simulates the discrepancies reconciliation catches."""
+        broker = PaperBroker(INSTRUMENTS)
+        broker.inject_position(BrokerPosition(A, Decimal(42), Decimal(500)))
+        assert broker.positions()[0].quantity == 42
 
 
 class TestReconciliation:

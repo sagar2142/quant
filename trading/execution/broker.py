@@ -125,15 +125,21 @@ class PaperBroker:
         if reference_price <= 0:
             raise BrokerError(f"reference price must be positive, got {reference_price}")
 
-        broker_order_id = f"paper-{uuid.uuid4().hex[:12]}"
-        self._submitted[broker_order_id] = order
-
-        fill_price = self._apply_slippage(order, reference_price)
         instrument = self.instruments.get(order.instrument_id)
         if instrument is None:
             raise BrokerError(f"unknown instrument {order.instrument_id}")
-        fill_price = instrument.round_to_tick(fill_price)
 
+        broker_order_id = f"paper-{uuid.uuid4().hex[:12]}"
+        self._submitted[broker_order_id] = order
+        order.broker_order_id = broker_order_id
+
+        # Drive the real state machine (§19). A simulator that fills an order
+        # while leaving it in CREATED means six weeks of paper never exercise
+        # the lifecycle that live trading depends on — and `cancel` below
+        # becomes unreachable, since CREATED has no legal path to CANCELLED.
+        self._advance(order)
+
+        fill_price = instrument.round_to_tick(self._apply_slippage(order, reference_price))
         self._fills.append(
             BrokerFill(
                 broker_fill_id=f"pf-{uuid.uuid4().hex[:12]}",
@@ -148,6 +154,25 @@ class PaperBroker:
         )
         self._apply_to_positions(order, fill_price)
         return broker_order_id
+
+    @staticmethod
+    def _advance(order: Order) -> None:
+        """Walk CREATED -> RISK_CHECKED -> SUBMITTED -> ACKNOWLEDGED.
+
+        Stops at ACKNOWLEDGED rather than filling the order object here: the
+        fill is reported through `fills_since`, and the caller applies it. That
+        is the same split a live venue imposes, and it is what lets `cancel`
+        exist at all — an acknowledged order is the only kind a venue can
+        cancel.
+
+        Only a CREATED order is walked. Anything further along has already been
+        submitted, and re-walking it would raise on an illegal transition,
+        turning a harmless duplicate submit into a crash mid-rebalance.
+        """
+        if order.state is not OrderState.CREATED:
+            return
+        for state in (OrderState.RISK_CHECKED, OrderState.SUBMITTED, OrderState.ACKNOWLEDGED):
+            order.transition(state, "paper venue")
 
     def _apply_slippage(self, order: Order, reference: Decimal) -> Decimal:
         """Move the price against the trader, always."""

@@ -365,6 +365,238 @@ class TestPositionsAndFills:
         assert fills[0].side is Side.BUY
 
 
+def mock_broker(handler, live_env=None):
+    """A KiteBroker whose HTTP goes to `handler` instead of the venue."""
+    from trading.execution.kite import KiteBroker
+
+    return KiteBroker(
+        CREDENTIALS,
+        INSTRUMENTS,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def responder(status: int = 200, payload: object = None):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=payload if payload is not None else {})
+
+    return handler
+
+
+def exploder(_request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("network down")
+
+
+class TestNetworkFailureIsUnknownNotAssumed:
+    """§19 — the one case where guessing is the expensive mistake.
+
+    A submit that fails mid-flight may or may not have reached the venue.
+    "Assume rejected" resends and doubles the position; "assume filled" leaves
+    the account holding nothing while believing otherwise. The adapter must
+    say UNKNOWN and force reconciliation.
+    """
+
+    def test_submit_network_failure_names_unknown(self, live_env):
+        broker = mock_broker(exploder)
+        with pytest.raises(BrokerError, match="UNKNOWN and must be reconciled"):
+            broker.submit(live_order(), Decimal(2900))
+
+    def test_budget_is_not_consumed_by_a_failed_submit(self, live_env):
+        """A submit that never landed must not eat the session budget — the
+        budget is a cap on what can reach the market, not on attempts."""
+        broker = mock_broker(exploder)
+        before = broker.remaining_budget
+        with pytest.raises(BrokerError):
+            broker.submit(live_order(), Decimal(2900))
+        assert broker.remaining_budget == before
+
+    def test_cancel_network_failure_is_reported(self, live_env):
+        with pytest.raises(BrokerError, match="network failure cancelling"):
+            mock_broker(exploder).cancel("o1")
+
+    def test_positions_network_failure_is_reported(self, live_env):
+        """Reconciliation that cannot reach the venue must fail loudly, never
+        return an empty book — an empty book reads as "flat" (§9)."""
+        with pytest.raises(BrokerError, match="could not fetch positions"):
+            mock_broker(exploder).positions()
+
+    def test_fills_network_failure_is_reported(self, live_env):
+        with pytest.raises(BrokerError, match="could not fetch trades"):
+            mock_broker(exploder).fills_since(None)
+
+
+class TestVenueRejections:
+    def test_non_200_submit_is_refused(self, live_env):
+        broker = mock_broker(responder(400, {"message": "insufficient funds"}))
+        with pytest.raises(BrokerError, match="Kite rejected order"):
+            broker.submit(live_order(), Decimal(2900))
+
+    def test_missing_order_id_is_refused(self, live_env):
+        """A 200 with no order_id means we do not know what was placed."""
+        broker = mock_broker(responder(200, {"data": {}}))
+        with pytest.raises(BrokerError, match="no order_id"):
+            broker.submit(live_order(), Decimal(2900))
+
+    def test_non_200_cancel_is_refused(self, live_env):
+        with pytest.raises(BrokerError, match="cancel of o1 failed"):
+            mock_broker(responder(500)).cancel("o1")
+
+    def test_non_200_positions_is_refused(self, live_env):
+        with pytest.raises(BrokerError, match="positions fetch failed"):
+            mock_broker(responder(503)).positions()
+
+    def test_non_200_trades_is_refused(self, live_env):
+        with pytest.raises(BrokerError, match="trades fetch failed"):
+            mock_broker(responder(503)).fills_since(None)
+
+
+class TestSuccessfulLivePath:
+    def test_a_clean_submit_returns_the_venue_id(self, live_env):
+        broker = mock_broker(responder(200, {"data": {"order_id": "251118000123"}}))
+        assert broker.submit(live_order(), Decimal(2900)) == "251118000123"
+
+    def test_budget_is_consumed_by_a_successful_submit(self, live_env):
+        broker = mock_broker(responder(200, {"data": {"order_id": "x"}}))
+        before = broker.remaining_budget
+        broker.submit(live_order(quantity=Decimal(10)), Decimal(2900))
+        assert broker.remaining_budget == before - Decimal(29_000)
+
+    def test_a_limit_order_sends_a_tick_rounded_price(self, live_env):
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(dict(httpx.QueryParams(request.content.decode())))
+            return httpx.Response(200, json={"data": {"order_id": "x"}})
+
+        broker = mock_broker(handler)
+        broker.submit(
+            live_order(order_type=OrderType.LIMIT, limit_price=Decimal("2900.123")),
+            Decimal(2900),
+        )
+        # NSE trades in 5-paisa ticks; an unrounded price is rejected outright.
+        assert seen["price"] == "2900.10"
+
+    def test_a_stop_order_sends_a_trigger_price(self, live_env):
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(dict(httpx.QueryParams(request.content.decode())))
+            return httpx.Response(200, json={"data": {"order_id": "x"}})
+
+        mock_broker(handler).submit(
+            live_order(order_type=OrderType.STOP, stop_price=Decimal("2850.07")),
+            Decimal(2900),
+        )
+        assert seen["trigger_price"] == "2850.05"
+
+    def test_the_idempotency_key_is_sent_as_the_tag(self, live_env):
+        """Second line of defence behind our own UNIQUE constraint (§19)."""
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(dict(httpx.QueryParams(request.content.decode())))
+            return httpx.Response(200, json={"data": {"order_id": "x"}})
+
+        placed = live_order()
+        mock_broker(handler).submit(placed, Decimal(2900))
+        assert seen["tag"] == placed.idempotency_key[:20]
+
+    def test_a_clean_cancel_returns(self, live_env):
+        mock_broker(responder(200, {"data": {"order_id": "o1"}})).cancel("o1")
+
+    def test_mode_is_live(self, live_env):
+        assert mock_broker(responder()).mode is TradingMode.LIVE
+
+
+class TestFillMarker:
+    def payload(self) -> object:
+        return {
+            "data": [
+                {
+                    "trade_id": f"t{i}",
+                    "order_id": f"o{i}",
+                    "tradingsymbol": "RELIANCE",
+                    "transaction_type": "BUY" if i % 2 else "SELL",
+                    "quantity": 10,
+                    "average_price": 2900.0 + i,
+                }
+                for i in range(3)
+            ]
+        }
+
+    def test_marker_returns_only_later_fills(self, live_env):
+        broker = mock_broker(responder(200, self.payload()))
+        assert [f.broker_fill_id for f in broker.fills_since("t0")] == ["t1", "t2"]
+
+    def test_unknown_marker_returns_everything(self, live_env):
+        """Fail safe: replaying a fill is caught downstream, skipping one is
+        invisible."""
+        broker = mock_broker(responder(200, self.payload()))
+        assert len(broker.fills_since("t-not-ours")) == 3
+
+    def test_sell_side_is_parsed(self, live_env):
+        broker = mock_broker(responder(200, self.payload()))
+        assert broker.fills_since(None)[0].side is Side.SELL
+
+
+class TestConnectionsAreNotLeaked:
+    """When the adapter creates its own client it must also close it.
+
+    A leaked connection per call is invisible until the process has run for a
+    session and hits the file-descriptor ceiling — at which point orders start
+    failing for a reason that looks nothing like the cause.
+    """
+
+    def owned_client_broker(self, monkeypatch, handler):
+        """A broker with `client=None`, so it constructs (and must close) its own."""
+        import trading.execution.kite as kite_module
+
+        created: list[httpx.Client] = []
+        real_client = httpx.Client
+
+        def factory(*args, **kwargs):
+            kwargs.pop("timeout", None)
+            client = real_client(transport=httpx.MockTransport(handler))
+            created.append(client)
+            return client
+
+        monkeypatch.setattr(kite_module.httpx, "Client", factory)
+        return kite_module.KiteBroker(CREDENTIALS, INSTRUMENTS), created
+
+    def test_submit_closes_its_own_client(self, live_env, monkeypatch):
+        broker, created = self.owned_client_broker(
+            monkeypatch, responder(200, {"data": {"order_id": "x"}})
+        )
+        broker.submit(live_order(), Decimal(2900))
+        assert created and all(c.is_closed for c in created)
+
+    def test_cancel_closes_its_own_client(self, live_env, monkeypatch):
+        broker, created = self.owned_client_broker(monkeypatch, responder(200, {"data": {}}))
+        broker.cancel("o1")
+        assert created and all(c.is_closed for c in created)
+
+    def test_positions_closes_its_own_client(self, live_env, monkeypatch):
+        broker, created = self.owned_client_broker(
+            monkeypatch, responder(200, {"data": {"net": []}})
+        )
+        broker.positions()
+        assert created and all(c.is_closed for c in created)
+
+    def test_fills_closes_its_own_client(self, live_env, monkeypatch):
+        broker, created = self.owned_client_broker(monkeypatch, responder(200, {"data": []}))
+        broker.fills_since(None)
+        assert created and all(c.is_closed for c in created)
+
+    def test_an_injected_client_is_left_open(self, live_env):
+        """The caller owns what the caller supplied — closing it would break
+        the next call on a shared session."""
+        client = httpx.Client(transport=httpx.MockTransport(responder(200, {"data": {"net": []}})))
+        from trading.execution.kite import KiteBroker
+
+        KiteBroker(CREDENTIALS, INSTRUMENTS, client=client).positions()
+        assert not client.is_closed
+
+
 class TestCredentialsNeverSerialised:
     def test_credentials_are_not_json_serialisable(self):
         """A credential must not slip into a log payload or an API response."""

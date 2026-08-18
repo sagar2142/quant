@@ -182,4 +182,8 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
     "@overload",
+    # Protocol method bodies are signatures, not code. They never execute, so
+    # counting them as uncovered would force meaningless tests against stubs.
+    '^\s*\.\.\.$',
+    'class .*\bProtocol\)',
 ]
