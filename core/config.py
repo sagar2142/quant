@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     #: explicitly true, whatever any strategy or agent believes (§21).
     live_enabled: bool = Field(default=False)
 
+    #: Telegram is the primary alarm, not the console and not the UI (§M9).
+    #: Empty means alerts still fire — to the console — but nothing will wake
+    #: you, and the M9 gate explicitly requires having been woken once.
+    #: These are chat-routing identifiers rather than trading credentials, so
+    #: they live here and not in `core.secrets`; they cannot place an order.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
+
     @property
     def lake(self) -> Path:
         path = self.lake_path.expanduser().resolve()

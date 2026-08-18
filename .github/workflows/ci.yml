@@ -69,10 +69,15 @@ jobs:
         run: pytest --cov --cov-report=term-missing
 
       # §14.5 — 100% required on modules where a wrong number costs money.
+      #
+      # `engine/accounting.py` is the ledger and `engine/backtest/sizing.py`
+      # turns a weight into a share count. Both sat outside this gate while it
+      # guarded `trading/portfolio/*`, a package that held no code — a gate
+      # pointed at an empty directory reports success over nothing.
       - name: coverage gate on money-touching modules
         run: |
           coverage report --fail-under=100 \
-            --include="engine/costs/*,trading/risk/*,trading/portfolio/*,trading/execution/*"
+            --include="engine/costs/*,engine/accounting.py,engine/backtest/sizing.py,trading/risk/*,trading/execution/*"
 
   regression:
     name: backtest golden numbers

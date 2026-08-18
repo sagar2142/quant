@@ -24,6 +24,7 @@ import numpy as np
 import numpy.typing as npt
 
 from core.instruments import InstrumentId
+from quant.math.timeseries.stationarity import MIN_OBSERVATIONS, assess_stationarity
 from quant.strategies.base import MarketView, Strategy, StrategySpec, TargetWeights
 
 __all__ = ["PairsTrading", "ZScoreReversion", "half_life"]
@@ -78,6 +79,7 @@ class ZScoreReversion(Strategy):
         exit_z: float = 0.5,
         max_zscore: float = 4.0,
         gross: Decimal = Decimal(1),
+        require_stationarity: bool = True,
     ) -> None:
         if exit_z >= entry_z:
             raise ValueError(f"exit_z ({exit_z}) must be inside entry_z ({entry_z})")
@@ -85,6 +87,16 @@ class ZScoreReversion(Strategy):
             raise ValueError(f"max_zscore ({max_zscore}) must exceed entry_z ({entry_z})")
         if lookback < MIN_ZSCORE_OBSERVATIONS:
             raise ValueError(f"lookback {lookback} is too short for a z-score")
+        if require_stationarity and lookback < MIN_OBSERVATIONS:
+            # Loud, because the alternative is silent. ADF and KPSS both refuse
+            # a window this short and fail closed, so the gate could never pass
+            # and the strategy would emit nothing at all — a strategy that
+            # quietly does nothing is worse than one that refuses to start.
+            raise ValueError(
+                f"lookback {lookback} is below the {MIN_OBSERVATIONS} bars the "
+                "stationarity tests need. Raise the lookback, or pass "
+                "require_stationarity=False to measure what the gate is worth."
+            )
 
         super().__init__(
             StrategySpec(
@@ -96,6 +108,7 @@ class ZScoreReversion(Strategy):
                     "entry_z": entry_z,
                     "exit_z": exit_z,
                     "max_zscore": max_zscore,
+                    "require_stationarity": require_stationarity,
                 },
                 lookback=lookback + 1,
                 max_position=Decimal("0.25"),
@@ -107,6 +120,7 @@ class ZScoreReversion(Strategy):
         self.exit_z = exit_z
         self.max_zscore = max_zscore
         self.gross = gross
+        self.require_stationarity = require_stationarity
 
     def zscore(self, view: MarketView, instrument_id: InstrumentId) -> float | None:
         series = view.series(instrument_id)
@@ -121,9 +135,32 @@ class ZScoreReversion(Strategy):
             return None
         return float((closes[-1] - closes.mean()) / std)
 
+    def is_fadeable(self, view: MarketView, instrument_id: InstrumentId) -> bool:
+        """Whether this name has a level worth fading at all (§253).
+
+        **The gate the plan asks for and the strategy previously lacked.** A
+        z-score assumes the mean it reverts to exists. On a series with a unit
+        root it does not: the "mean" is wherever the random walk has been, and
+        fading deviations from it is a machine for buying things on their way
+        down. That is the named risk of strategy family 4.
+
+        Costs one ADF and one KPSS test per name per bar. Disable only to
+        measure what the gate is worth on your data — never to trade without
+        it.
+        """
+        if not self.require_stationarity:
+            return True
+        series = view.series(instrument_id)
+        if series.height < self.window:
+            return False
+        closes = [float(c) for c in series["close"].tail(self.window).to_list()]
+        return assess_stationarity(closes).tradable_as_mean_reversion
+
     def generate(self, view: MarketView) -> TargetWeights:
         signals: dict[InstrumentId, Decimal] = {}
         for name in view.universe:
+            if not self.is_fadeable(view, name):
+                continue
             z = self.zscore(view, name)
             if z is None:
                 continue
@@ -163,6 +200,7 @@ class PairsTrading(Strategy):
         exit_z: float = 0.5,
         max_half_life: float = 30.0,
         gross: Decimal = Decimal(1),
+        require_cointegration: bool = True,
     ) -> None:
         if exit_z >= entry_z:
             raise ValueError(f"exit_z ({exit_z}) must be inside entry_z ({entry_z})")
@@ -179,6 +217,7 @@ class PairsTrading(Strategy):
                     "entry_z": entry_z,
                     "exit_z": exit_z,
                     "max_half_life": max_half_life,
+                    "require_cointegration": require_cointegration,
                 },
                 lookback=lookback + 1,
                 max_position=Decimal("0.5"),
@@ -192,6 +231,7 @@ class PairsTrading(Strategy):
         self.exit_z = exit_z
         self.max_half_life = max_half_life
         self.gross = gross
+        self.require_cointegration = require_cointegration
 
     def _prices(
         self, view: MarketView
@@ -227,6 +267,17 @@ class PairsTrading(Strategy):
         spread = left - beta * right
         # A spread that does not decay is a drift, not a tradable relationship.
         if half_life(spread) > self.max_half_life:
+            return TargetWeights(view.as_of, {})
+
+        # The stronger claim, and the one that matters (§254). Two names that
+        # both trend up are correlated and will look like a wonderful pair
+        # right until they diverge permanently. Only a *stationary spread*
+        # means there is a level to revert to; the half-life filter above
+        # cannot distinguish a real one from a slow drift.
+        if (
+            self.require_cointegration
+            and not assess_stationarity(spread).verdict.supports_mean_reversion
+        ):
             return TargetWeights(view.as_of, {})
 
         std = float(np.std(spread, ddof=1))

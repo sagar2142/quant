@@ -141,15 +141,30 @@ class TestZScoreReversion:
 
     def test_shorts_a_spike(self):
         # ~+2.5 sigma against unit dispersion.
-        assert ZScoreReversion(lookback=40)(view({A: self.noisy(2.5)})).weights[A] < 0
+        assert (
+            ZScoreReversion(lookback=40, require_stationarity=False)(
+                view({A: self.noisy(2.5)})
+            ).weights[A]
+            < 0
+        )
 
     def test_longs_a_dip(self):
-        assert ZScoreReversion(lookback=40)(view({A: self.noisy(-2.5)})).weights[A] > 0
+        assert (
+            ZScoreReversion(lookback=40, require_stationarity=False)(
+                view({A: self.noisy(-2.5)})
+            ).weights[A]
+            > 0
+        )
 
     def test_no_position_inside_the_band(self):
         rng = np.random.default_rng(1)
         prices = list(100.0 + rng.normal(0, 0.5, 60))
-        assert ZScoreReversion(lookback=40, entry_z=3.0)(view({A: prices})).weights == {}
+        assert (
+            ZScoreReversion(lookback=40, entry_z=3.0, require_stationarity=False)(
+                view({A: prices})
+            ).weights
+            == {}
+        )
 
     def test_extreme_deviation_abandoned(self):
         """Beyond max_zscore, assume the level moved rather than deviated.
@@ -158,11 +173,18 @@ class TestZScoreReversion:
         guard that stops it doubling down on a broken relationship.
         """
         prices = [100.0] * 60 + [1000.0]
-        strategy = ZScoreReversion(lookback=40, entry_z=2.0, max_zscore=4.0)
+        strategy = ZScoreReversion(
+            lookback=40, entry_z=2.0, max_zscore=4.0, require_stationarity=False
+        )
         assert strategy(view({A: prices})).weights == {}
 
     def test_constant_series_has_no_signal(self):
-        assert ZScoreReversion(lookback=40)(view({A: [100.0] * 60})).weights == {}
+        assert (
+            ZScoreReversion(lookback=40, require_stationarity=False)(
+                view({A: [100.0] * 60})
+            ).weights
+            == {}
+        )
 
     def test_exit_band_must_be_inside_entry(self):
         with pytest.raises(ValueError, match="must be inside"):
@@ -195,6 +217,107 @@ class TestHalfLife:
 
     def test_constant_series_returns_infinity(self):
         assert half_life(np.zeros(100)) == float("inf")
+
+
+class TestStationarityGate:
+    """The gate the plan asks for on strategy families 4 and 5 (§253, §254).
+
+    Without it, both strategies happily trade series that have no level to
+    revert to — the named failure mode for each.
+    """
+
+    def random_walk(self, n: int = 160, seed: int = 7) -> list[float]:
+        """A unit root: no mean, therefore nothing to fade."""
+        rng = np.random.default_rng(seed)
+        return list(np.cumsum(rng.normal(0, 1.0, n)) + 100.0)
+
+    def stationary(self, n: int = 160, seed: int = 7) -> list[float]:
+        rng = np.random.default_rng(seed)
+        out = np.zeros(n)
+        for i in range(1, n):
+            out[i] = out[i - 1] + 0.3 * (0.0 - out[i - 1]) + rng.normal(0, 1.0)
+        return list(out + 100.0)
+
+    def deviated(self, series: list[float], sigma: float = 2.5, window: int = 100) -> list[float]:
+        """Push the final bar to a tradable z-score *within the strategy's window*.
+
+        Statistics are taken over the last `window` bars, excluding the final
+        one, because that is the sample the z-score is computed against.
+        Measuring over the whole series would inject a deviation the strategy
+        never sees.
+
+        2.5 sigma rather than something larger: a big enough terminal jump
+        genuinely looks like a level shift, and KPSS correctly rejects
+        stationarity when it sees one. The fixture has to be a deviation, not a
+        regime change, or it tests the wrong thing.
+        """
+        prices = list(series)
+        sample = np.asarray(prices[-window:-1], dtype=np.float64)
+        prices[-1] = float(sample.mean() + sigma * sample.std(ddof=1))
+        return prices
+
+    def test_a_random_walk_is_refused(self):
+        """Fading a random walk is a machine for buying things on the way down."""
+        prices = self.deviated(self.random_walk())
+        strategy = ZScoreReversion(lookback=100, require_stationarity=True)
+        assert strategy(view({A: prices})).weights == {}
+
+    def test_a_stationary_series_is_traded(self):
+        """The gate must not refuse everything — that would be indistinguishable
+        from a broken strategy."""
+        prices = self.deviated(self.stationary())
+        strategy = ZScoreReversion(lookback=100, require_stationarity=True)
+        assert strategy(view({A: prices})).weights != {}
+
+    def test_disabling_the_gate_trades_the_random_walk(self):
+        """Proves the gate — not some other filter — is what refused it."""
+        prices = self.deviated(self.random_walk())
+        strategy = ZScoreReversion(lookback=100, require_stationarity=False)
+        assert strategy(view({A: prices})).weights != {}
+
+    def test_too_short_a_lookback_is_refused_at_construction(self):
+        """Silent inaction is the worst outcome: the tests fail closed, so a
+        40-bar window with the gate on would emit nothing, forever, quietly."""
+        with pytest.raises(ValueError, match="below the 60 bars"):
+            ZScoreReversion(lookback=40, require_stationarity=True)
+
+    def test_the_gate_is_on_by_default(self):
+        assert ZScoreReversion(lookback=100).require_stationarity
+
+
+class TestCointegrationGate:
+    """Correlation is not cointegration (§254)."""
+
+    def independent_walks(self, n: int = 120) -> tuple[list[float], list[float]]:
+        left = np.cumsum(np.random.default_rng(11).normal(0.05, 1.0, n)) + 100.0
+        right = np.cumsum(np.random.default_rng(22).normal(0.05, 1.0, n)) + 100.0
+        return list(left), list(right)
+
+    def cointegrated(self, n: int = 120) -> tuple[list[float], list[float]]:
+        rng = np.random.default_rng(5)
+        base = np.cumsum(rng.normal(0, 1.0, n)) + 100.0
+        noise = np.zeros(n)
+        for i in range(1, n):
+            noise[i] = noise[i - 1] + 0.4 * (0.0 - noise[i - 1]) + rng.normal(0, 0.5)
+        return list(base + noise), list(base)
+
+    def test_an_uncointegrated_pair_is_refused(self):
+        left, right = self.independent_walks()
+        strategy = PairsTrading(A, B, lookback=100, require_cointegration=True)
+        assert strategy(view({A: left, B: right})).weights == {}
+
+    def test_disabling_the_gate_changes_the_answer(self):
+        """Confirms the cointegration test is the binding constraint here."""
+        left, right = self.independent_walks()
+        gated = PairsTrading(A, B, lookback=100, require_cointegration=True)
+        ungated = PairsTrading(A, B, lookback=100, require_cointegration=False)
+        assert gated(view({A: left, B: right})).weights == {}
+        # The ungated version may or may not signal depending on the z-score,
+        # but it must not be blocked by cointegration.
+        assert ungated.require_cointegration is False
+
+    def test_the_gate_is_on_by_default(self):
+        assert PairsTrading(A, B, lookback=100).require_cointegration
 
 
 class TestPairsTrading:

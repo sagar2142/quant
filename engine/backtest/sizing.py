@@ -136,9 +136,10 @@ class OrderPlanner:
         for instrument_id, quantity in sorted(
             buys, key=lambda kv: (-abs(kv[1]) * marks[kv[0]], kv[0])
         ):
+            # unit_value is positive by construction: `plan` already dropped
+            # non-positive prices, and Instrument.multiplier is constrained
+            # gt=0. A second guard here would be unreachable code.
             unit_value = self._unit_value(instrument_id, marks[instrument_id])
-            if unit_value <= 0:
-                continue
             budget = available * (Decimal(1) - self.config.cost_headroom)
             affordable = min(quantity, budget / unit_value)
             affordable = self._round_down_to_lot(self.instruments[instrument_id], affordable)

@@ -133,9 +133,10 @@ HUMAN_ATTESTATIONS = [
         "India, but confirm it for your structure before deploying (§32).",
     ),
     (
-        "Crypto tax position understood",
-        "Section 115BBH: 30% flat, NO loss set-off, 1% TDS. This is why live "
-        "capital goes to NSE equity and crypto stays a research environment (§0.1).",
+        "Equity tax position understood",
+        "STCG/LTCG treatment, turnover-based audit thresholds, and whether your "
+        "activity is business income or capital gains. The answer changes what "
+        "you owe on the same P&L (§32).",
     ),
     (
         "Broker terms and market-data licence reviewed",

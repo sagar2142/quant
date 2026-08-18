@@ -191,7 +191,7 @@ neutron/
 ├── quant/
 │   ├── math/
 │   │   ├── stats/       # moments · robust estimators · hypothesis tests
-│   │   ├── timeseries/  # stationarity · cointegration · GARCH · Kalman · HMM
+│   │   ├── timeseries/  # stationarity · cointegration · volatility (GARCH/EWMA)
 │   │   ├── linalg/      # PCA · covariance shrinkage · conditioning
 │   │   ├── optim/       # mean-variance · risk parity · HRP
 │   │   └── metrics/     # Sharpe · Sortino · DSR · PBO · drawdown analytics
@@ -203,7 +203,6 @@ neutron/
 │   ├── validation/      # the gauntlet
 │   └── experiments/     # registry · pre-registration · trial counter
 ├── trading/
-│   ├── portfolio/       # target positions · sizing · vol targeting
 │   ├── risk/            # INDEPENDENT — separate process
 │   ├── paper/           # simulated fills on live data
 │   ├── execution/       # order state machine · broker routing
@@ -371,8 +370,8 @@ Each teaches specific math and specific failure modes. Build in this order; don'
 | 1 | SMA/EMA crossover, single asset | rolling stats, signal lag | whipsaw, turnover drag, why costs matter | ❌ (baseline only) |
 | 2 | Time-series momentum (12-1) | return aggregation, vol scaling | regime dependence | ⚠️ |
 | 3 | **Cross-sectional momentum**, NSE top-100 | ranking, PIT universe, neutralization | survivorship bias — hard | ✅ **strongest first candidate** |
-| 4 | Mean reversion, single asset z-score | stationarity, ADF, Hurst | non-stationarity, fat left tail | ⚠️ |
-| 5 | Pairs trading | cointegration, Kalman hedge ratio, OU half-life | spurious correlation, regime break | ⚠️ (learn, don't fund) |
+| 4 | Mean reversion, single asset z-score | stationarity, ADF, Hurst | non-stationarity, fat left tail | ⚠️ **gated**: `ZScoreReversion(require_stationarity=True)` by default |
+| 5 | Pairs trading | cointegration, Kalman hedge ratio, OU half-life | spurious correlation, regime break | ⚠️ (learn, don't fund) **gated**: `PairsTrading(require_cointegration=True)` by default |
 | 6 | **Volatility targeting overlay** | GARCH/EWMA, realized vol | — | ✅ **apply to everything** |
 | 7 | Multi-factor cross-sectional | cross-sectional regression, PCA, shrinkage | factor crowding, correlated bets | ✅ |
 | 8 | Cross-market momentum (NSE + US) | cross-sectional ranking across venues | currency and session misalignment | ✅ strong validation tool |
@@ -588,6 +587,7 @@ Each phase has a gate. No gate skip. The PDF's 90-day plan is team-scale; this i
 - Same code path as live, broker submission swapped for simulation
 - Daily reconciliation report + Telegram alerting (fills, PnL, risk utilization, data staleness)
 - **Paper-vs-backtest drift tracking** — the truth metric, read from `paper_equity.ndjson`
+- Alerting is WIRED: `ops/routing.py` builds the channel set from config, and `apps/cli/paper` raises a CRITICAL page with a runbook link on any reconciliation break, a warning on blocked orders, and an INFO summary otherwise. Console is always a sink so a misconfigured token degrades to a printed alert rather than silence. Set `NEUTRON_TELEGRAM_BOT_TOKEN` and `NEUTRON_TELEGRAM_CHAT_ID` to make it wake you.
 - **Gate**: 6+ weeks continuous paper on ≥1 strategy; drift explained and within tolerance; zero unexplained reconciliation breaks; you have been woken by an alert at least once and the runbook worked.
 
 ### M11 — Live Readiness
@@ -1203,7 +1203,7 @@ Never abbreviate domain terms: `volatility` not `vol` in public APIs (locals are
 | Order state machine | every transition + every illegal transition rejected |
 | Risk engine | every limit tested at boundary, boundary−1, boundary+1 |
 
-**Coverage: don't chase 100% globally.** Require **100%** on `engine/costs`, `trading/risk`, `trading/portfolio` accounting, `trading/execution` state machine. Those are the modules where a wrong number costs money. Everything else: whatever coverage the meaningful tests produce.
+**Coverage: don't chase 100% globally.** Require **100%** on `engine/costs`, `trading/risk`, `trading/execution` state machine, and the accounting itself — `engine/accounting.py` (the ledger) and `engine/backtest/sizing.py` (weights to share counts). The plan originally said `trading/portfolio` here; that package never held code, the accounting landed in `engine/`, and a gate pointed at an empty directory reports success over nothing. Corrected 2026-08-18. Those are the modules where a wrong number costs money. Everything else: whatever coverage the meaningful tests produce.
 
 Naming: `test_<unit>_<condition>_<expected>` — e.g. `test_stt_delivery_charged_on_both_legs`.
 

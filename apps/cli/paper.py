@@ -37,6 +37,8 @@ from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.accounting import Portfolio
 from engine.costs.india import NseEquityCostModel
+from ops.alerts import AlertRouter
+from ops.routing import build_router, describe_channels
 from quant.strategies.base import MarketView, Strategy
 from quant.strategies.baselines import CrossSectionalMomentum
 from trading.execution.broker import BrokerPosition, PaperBroker
@@ -229,8 +231,18 @@ def run_cycle_for(
     )
 
 
-def persist_outcome(store: PaperStateStore, state: PaperState, report: CycleReport) -> int:
-    """Save everything the next cycle needs, then translate halt to exit code."""
+def persist_outcome(
+    store: PaperStateStore,
+    state: PaperState,
+    report: CycleReport,
+    alerts: AlertRouter,
+) -> int:
+    """Save everything the next cycle needs, then translate halt to exit code.
+
+    **State is written before the alert is sent.** If the alerting API is
+    unreachable the halt must still survive into the next run; the reverse
+    order would let a network failure lose the halt entirely.
+    """
     state.peak_equity = report.peak_equity
     state.cycles += 1
     state.last_cycle_at = utc_now()
@@ -247,15 +259,55 @@ def persist_outcome(store: PaperStateStore, state: PaperState, report: CycleRepo
     )
     print(f"state saved   : {store.state_path} (cycle {state.cycles})")
 
+    announce(alerts, state, report)
+
     if state.halted:
         print("HALTED — investigate the break, then re-run with --clear-halt")
         return HALTED_EXIT
     return 0
 
 
+def announce(alerts: AlertRouter, state: PaperState, report: CycleReport) -> None:
+    """Send whatever this cycle earned.
+
+    A halt pages; a blocked order warns; an ordinary session files a summary.
+    §M9 gates live trading on having been woken by an alert at least once, and
+    that cannot happen if the only record is a log line nobody reads.
+
+    Alert delivery never affects the exit code. An unreachable Telegram must not
+    turn a clean session into a failure, and it must not turn a halted one into
+    a success — the halt is already persisted above.
+    """
+    if report.should_halt and report.reconciliation is not None:
+        breaks = report.reconciliation.critical_breaks
+        alerts.reconciliation_break(
+            len(breaks),
+            f"session {report.session}: "
+            + "; ".join(b.format().strip() for b in breaks)
+            + "\nAccount is HALTED. No further cycles until --clear-halt.",
+        )
+        return
+
+    if report.blocked:
+        first = report.blocked[0]
+        alerts.risk_breach(
+            first.verdict.reasons[0] if first.verdict.reasons else "risk",
+            Decimal(len(report.blocked)),
+            Decimal(0),
+        )
+
+    alerts.daily_summary(
+        pnl=report.closing_equity - report.opening_equity,
+        positions=len(state.portfolio.open_positions()),
+        drift=None,  # needs a matched backtest run; M9-M10
+    )
+
+
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     store = PaperStateStore(args.state_dir)
+    alerts = build_router()
+    print(describe_channels())
 
     state = resume_state(store, args)
     if state is None:
@@ -289,7 +341,7 @@ def run(argv: list[str] | None = None) -> int:
 
     report = run_cycle_for(state, history, universe, args)
     print(report.format())
-    return persist_outcome(store, state, report)
+    return persist_outcome(store, state, report, alerts)
 
 
 if __name__ == "__main__":

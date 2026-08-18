@@ -90,6 +90,8 @@ rather than something you test for. A lint rejects `.view()` without `as_of`.
 **2. Float for statistics, Decimal for money.** If a broker could disagree with
 you about a number, it is `Decimal`. A lint rejects `float` anywhere under
 `trading/portfolio`, `trading/execution`, `trading/reconcile` or `engine/costs`.
+The same modules, plus `engine/accounting.py` and `engine/backtest/sizing.py`,
+carry a 100% coverage gate in CI.
 
 **3. `receive_time` is never a copy of `event_time`.** Every loader stamps a
 real publication lag. If they were equal, a strategy could act on a bar's close
