@@ -49,12 +49,12 @@ dev = [
     "types-requests",
     "pandas-stubs",
 ]
-lab = [
-    "streamlit>=1.38",
-    "jupyterlab>=4.2",
-    "matplotlib>=3.9",
-    "plotly>=5.24",
-]
+# No `lab` extra. §12.6 sketched the research surface as Streamlit; it is built
+# as `apps/report` instead, which emits a self-contained HTML file with inline
+# SVG. A report has to be an artifact — §5 requires every number to stay
+# traceable to an experiment row a year later, and a session on a running
+# server is not. That also removes ~200MB of plotting dependencies and the need
+# for anything to be running in order to look at a chart.
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -108,7 +108,6 @@ ignore = [
 # Deferred imports in tests guard optional dependencies; C408 dict() kwargs
 # make fixture builders readable.
 "tests/**"       = ["S", "PLR2004", "ARG", "DTZ", "PLC0415", "C408"]
-"apps/lab/**"    = ["T20"]         # streamlit/notebook surface is disposable
 "apps/cli/**"    = ["T20"]         # a CLI's output IS its interface
 "tools/lints/**" = ["T20"]         # lint CLI prints diagnostics by design
 # A strategy's constructor parameters ARE its specification — they are already
@@ -149,12 +148,12 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = [
     "statsmodels.*", "arch.*", "cvxpy.*", "duckdb.*", "yfinance.*",
-    "sklearn.*", "scipy.*", "exchange_calendars.*", "plotly.*", "streamlit.*",
+    "sklearn.*", "scipy.*", "exchange_calendars.*",
 ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["apps.lab.*", "tests.*"]
+module = ["tests.*"]
 strict = false
 disallow_untyped_defs = false
 
@@ -174,7 +173,7 @@ filterwarnings = ["error::DeprecationWarning"]
 [tool.coverage.run]
 branch = true
 source = ["core", "data", "quant", "engine", "trading"]
-omit = ["*/__init__.py", "apps/lab/*"]
+omit = ["*/__init__.py"]
 
 [tool.coverage.report]
 exclude_lines = [

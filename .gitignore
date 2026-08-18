@@ -18,6 +18,9 @@ backfill.log
 *.duckdb.wal
 artifacts/
 runs/
+# Generated reports. Keep one deliberately by committing it with the
+# experiment it explains; do not sweep every exploratory run into git.
+reports/
 
 # ── notebooks: output stripped, but never commit checkpoints ─────────────────
 .ipynb_checkpoints/

@@ -212,7 +212,7 @@ neutron/
 ├── ops/                 # monitor · alert · runbooks
 ├── apps/
 │   ├── api/             # FastAPI gateway
-│   ├── lab/             # Streamlit research surface (M1-M7, disposable)
+│   ├── report/          # static HTML research reports (artifacts, not sessions)
 │   └── web/             # React ops console (M8+, designed — see Part 12)
 │       ├── tokens/      # design tokens = single source of truth for color/size
 │       ├── components/  # Button, Table, Metric, VitalsBar, ...
@@ -748,8 +748,12 @@ Inputs and selects match button heights exactly (28/32/36) so toolbars align on 
 
 Two surfaces, deliberately different investment levels:
 
-**Research surface (Streamlit/Jupyter, M1–M7)** — zero design investment. It's a lab notebook. Ugly is fine; fast iteration is the point.
-- Experiment browser · backtest report · **parameter surface plots** (the mesa-vs-needle check from §5.4 — matplotlib/plotly in Python, never rebuilt in the web UI) · gauntlet report · data quality report
+**Research surface (static HTML reports, M1–M7)** — zero design investment beyond reusing the tokens. Built as `apps/report` + `apps.cli.report`.
+- backtest report · **parameter surface plots** (the mesa-vs-needle check from §5.4) · gauntlet report · data quality report
+
+**Revised from Streamlit (2026-08-18).** The original plan said Streamlit here, for good reasons that no longer apply. Two things changed. First, the React console already exists, so the "don't build React until you know your screens" sequencing this section depended on is spent. Second, and more important: §5 requires every number to stay traceable to an experiment row a year later, and **a Streamlit session cannot be kept**. A file can be committed beside the numbers it explains, attached to a CI run, or opened on a machine with nothing installed. The charts are inline SVG generated in ~250 lines, which costs less than the 200MB of plotting dependencies and the server process it replaces.
+
+**The verdict is rendered above every chart, deliberately.** This whole section is a hazard: a report that opens with a rising equity curve invites "that looks good" before the reader reaches the statistics, and that is precisely the bias §5.4 exists to kill. The charts explain a verdict already reached; they are never a decision surface, and the report says so in its own footer.
 
 **Operations surface (React, M8+)** — full design system. This is what you stare at while capital is live.
 
@@ -948,7 +952,7 @@ License-audited. Zero recurring software cost. Only paid line item in the entire
 | Stats | NumPy · SciPy · statsmodels · arch · scikit-learn | BSD | ₹0 |
 | Optimization | cvxpy | Apache-2.0 | ₹0 |
 | Fast screening | vectorbt (community) | Apache-2.0 | ₹0 |
-| Research UI | Streamlit / JupyterLab | Apache-2.0 / BSD | ₹0 |
+| Research UI | static HTML + inline SVG (no dependency) | — | ₹0 |
 
 ### 13.3 Infra & ops
 | Concern | Choice | License | Cost |
@@ -1028,7 +1032,7 @@ Everything the engine does, it does with zero clients connected. Closing the UI 
 
 | Stage | Client | Why |
 |---|---|---|
-| M1–M7 | **Streamlit in browser**, all local, no VPS | Research surface. Disposable. Zero investment |
+| M1–M7 | **HTML reports on disk**, all local, no VPS | Research surface. Artifacts, keepable, zero runtime |
 | M8–M10 | **React served by FastAPI**, opened in browser | Build and validate screens against real paper data. No packaging problem to solve yet |
 | M11+ | **Tauri wrapping the same React build** | Live trading. Earns its place at exactly this point |
 
@@ -1063,7 +1067,7 @@ M1–M8 run entirely on your laptop — no VPS, no exposure, nothing to secure y
 ### 13.8 Where UI work lands in the roadmap
 | Phase | UI investment |
 |---|---|
-| M1–M7 | Streamlit only. **Do not build React yet** — you don't know your screens until you've operated the research loop |
+| M1–M7 | HTML reports only. **Do not build React yet** — you don't know your screens until you've operated the research loop |
 | M8 | Design tokens + component library + vitals bar. One focused week |
 | M9–M10 | Ops screens built against real paper-trading data — the requirements are now known, not guessed |
 | M11+ | Refinement driven by actual operator pain, not speculation |

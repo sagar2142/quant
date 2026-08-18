@@ -41,6 +41,9 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 # One paper trading cycle. Run it once per session, after the ingest.
 .\.venv\Scripts\python.exe -m apps.cli.paper --top 30
 
+# Backtest + gauntlet as one self-contained HTML file you can keep
+.\.venv\Scripts\python.exe -m apps.cli.report --top 30 --out reports\momentum.html
+
 # Data quality report; exits non-zero on any CRITICAL finding
 .\.venv\Scripts\python.exe -m apps.cli.quality
 
@@ -68,7 +71,7 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 | `engine/` | Backtester, cost models, validation gauntlet, experiment registry. |
 | `trading/` | Portfolio, risk, paper, execution, reconciliation. |
 | `ai/` | Research agents. No import path to `trading/` or secrets. M13+. |
-| `apps/` | `cli/` commands, `api/` FastAPI, `lab/` Streamlit, `web/` React console. |
+| `apps/` | `cli/` commands, `report/` static HTML research reports, `api/` FastAPI, `web/` React console. |
 | `db/migrations/` | Schema. The research protocol is enforced here, not in app code. |
 | `tools/lints/` | The five custom AST lints. |
 

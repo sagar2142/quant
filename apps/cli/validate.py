@@ -66,6 +66,21 @@ COMPARE_FRACTION = 0.45
 NSE_SESSIONS = 252
 
 
+class SweepTooShortError(RuntimeError):
+    """The parameter sweep produced nothing usable.
+
+    Raised rather than returned: without a sweep there is no PBO matrix and no
+    neighbourhood, so two of the twelve checks cannot run at all. Continuing
+    would produce a report claiming twelve checks while silently running ten.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "parameter sweep produced no returns — the panel is shorter than "
+            "the longest swept lookback. Ingest more sessions."
+        )
+
+
 def build_market(
     instruments: dict[InstrumentId, Instrument], cost_multiple: Decimal = Decimal(1)
 ) -> MarketModel:
@@ -176,6 +191,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--skip", type=int, default=5)
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--sessions",
+        type=int,
+        default=0,
+        help=(
+            "Trailing sessions to test over. 0 (default) uses the whole panel. "
+            "Cost is linear in this and in every sample count below — the "
+            "gauntlet re-runs the backtest dozens of times."
+        ),
+    )
     # Each sample is a full backtest, so these are the run's cost knobs. The
     # defaults are the floors the checks accept; raising them buys a percentile
     # you can believe, at linear expense.
@@ -188,59 +213,88 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+def load_market(args: argparse.Namespace) -> tuple[Panel, list[float]] | None:
+    """The panel, its universe, and the baseline equity curve.
 
+    Shared by `apps.cli.validate` and `apps.cli.report` so the two can never
+    disagree about what was tested. Returns None, having explained why, when
+    there is nothing to test.
+    """
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
     try:
         history = load_panel(store)
     except NoDataError as exc:
         print(f"{exc}")
-        return 1
+        return None
 
     universe = build_universe(store, args.top)
     if not universe:
         print("universe is empty — ingest more sessions")
-        return 1
+        return None
+
+    if args.sessions:
+        # Trailing window. The universe is still built from the whole panel, so
+        # membership stays point-in-time correct; only the tested span shrinks.
+        recent = history["event_time"].unique().sort().tail(args.sessions)
+        history = history.filter(pl.col("event_time").is_in(recent.implode()))
 
     symbols = dict(history.select("instrument_id", "symbol").unique().iter_rows())
     instruments = {InstrumentId(i): nse_instrument(i, symbols.get(i, i)) for i in universe}
+    panel = Panel(history=history, instruments=instruments, universe=universe)
 
+    sessions = history["event_time"].n_unique()
+    runs = len(sweep_configurations()) + args.dropout_samples + args.placebo_samples + 3
     print(
-        f"assembling gauntlet inputs for momentum({args.lookback}/{args.skip}) "
-        f"over {len(universe)} NSE names..."
+        f"{runs} backtests over {sessions:,} sessions x {len(universe)} names. "
+        "Reduce with --sessions, --dropout-samples, --placebo-samples."
     )
 
-    panel = Panel(history=history, instruments=instruments, universe=universe)
-    baseline = run_one(panel, args.lookback, args.skip)
-    if baseline.size == 0:
-        print("no returns produced — the panel is shorter than the lookback")
-        return 1
+    engine = BacktestEngine(
+        strategy=CrossSectionalMomentum(
+            lookback_bars=args.lookback, skip_bars=args.skip, top_fraction=MOMENTUM_TOP_FRACTION
+        ),
+        market=build_market(instruments),
+        config=BacktestConfig(initial_cash=Decimal(1_000_000)),
+    )
+    result = engine.run(history, universe=universe)
+    equity = [float(v) for v in result.equity_curve["equity"].to_list()]
+    return panel, equity
 
-    stats = summarise(baseline, periods_per_year=NSE_SESSIONS)
-    print("\nbaseline performance:")
-    print(stats.format())
-    if stats.is_implausible:
-        print("\n  WARNING: Sharpe above the 2.5 smell test (§2.1) — suspect a leak")
 
+def sweep_configurations() -> list[tuple[int, int]]:
+    """Every (lookback, skip) the neighbourhood is measured over."""
+    return [
+        (lookback, skip) for lookback in SWEEP_LOOKBACK for skip in SWEEP_SKIP if skip < lookback
+    ]
+
+
+def assemble_inputs(
+    panel: Panel, args: argparse.Namespace, baseline: npt.NDArray[np.float64]
+) -> tuple[GauntletInputs, list[float], list[str]]:
+    """Re-run the backtest under every condition the twelve checks require.
+
+    Returns the inputs, the parameter-neighbourhood Sharpes, and their labels.
+    The last two are returned rather than recomputed because plotting the
+    neighbourhood from a second sweep would risk plotting a different sweep
+    than the one that was judged.
+    """
+    history = panel.history
     corrupted = run_one(replace(panel, history=corrupt_future(history)), args.lookback, args.skip)
     size = int(min(baseline.size, corrupted.size) * COMPARE_FRACTION)
     shuffled = np.concatenate([corrupted[:size], baseline[size:]])
 
     sweep: list[npt.NDArray[np.float64]] = []
     neighbourhood: list[float] = []
-    for lookback in SWEEP_LOOKBACK:
-        for skip in SWEEP_SKIP:
-            if skip >= lookback:
-                continue
-            rets = run_one(panel, lookback, skip)
-            if rets.size:
-                sweep.append(rets)
-                neighbourhood.append(summarise(rets, periods_per_year=NSE_SESSIONS).sharpe)
+    labels: list[str] = []
+    for lookback, skip in sweep_configurations():
+        rets = run_one(panel, lookback, skip)
+        if rets.size:
+            sweep.append(rets)
+            neighbourhood.append(summarise(rets, periods_per_year=NSE_SESSIONS).sharpe)
+            labels.append(f"{lookback}/{skip}")
 
     if not sweep:
-        print("parameter sweep produced nothing — the panel is too short")
-        return 1
+        raise SweepTooShortError
 
     width = min(r.size for r in sweep)
     sweep_matrix = np.column_stack([r[:width] for r in sweep])
@@ -249,7 +303,7 @@ def run(argv: list[str] | None = None) -> int:
     print(f"universe dropout: {args.dropout_samples} subsets at {DROPOUT_FRACTION:.0%} removed...")
     dropout = universe_dropout_sharpes(
         dropout_runner(panel, args.lookback, args.skip),
-        universe,
+        panel.universe,
         SamplingSpec(seed=SEED, samples=args.dropout_samples, periods_per_year=NSE_SESSIONS),
     )
 
@@ -259,7 +313,7 @@ def run(argv: list[str] | None = None) -> int:
         SamplingSpec(seed=SEED, samples=args.placebo_samples, periods_per_year=NSE_SESSIONS),
     )
 
-    market = market_proxy(history, universe)
+    market = market_proxy(history, panel.universe)
     regimes = regime_slices(baseline, market["market_return"].to_numpy())
     print(f"regimes found: {', '.join(sorted(regimes)) if regimes else 'none — sample too short'}")
 
@@ -279,6 +333,38 @@ def run(argv: list[str] | None = None) -> int:
         trade_returns=baseline[baseline != 0],
         periods_per_year=NSE_SESSIONS,
     )
+    return inputs, neighbourhood, labels
+
+
+def run(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
+    market = load_market(args)
+    if market is None:
+        return 1
+    panel, _equity = market
+
+    print(
+        f"assembling gauntlet inputs for momentum({args.lookback}/{args.skip}) "
+        f"over {len(panel.universe)} NSE names..."
+    )
+
+    baseline = run_one(panel, args.lookback, args.skip)
+    if baseline.size == 0:
+        print("no returns produced — the panel is shorter than the lookback")
+        return 1
+
+    stats = summarise(baseline, periods_per_year=NSE_SESSIONS)
+    print("\nbaseline performance:")
+    print(stats.format())
+    if stats.is_implausible:
+        print("\n  WARNING: Sharpe above the 2.5 smell test (§2.1) — suspect a leak")
+
+    try:
+        inputs, _neighbourhood, _labels = assemble_inputs(panel, args, baseline)
+    except SweepTooShortError as exc:
+        print(exc)
+        return 1
 
     print()
     print(run_gauntlet(inputs, short_circuit=False).format())
