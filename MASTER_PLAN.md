@@ -748,6 +748,10 @@ Inputs and selects match button heights exactly (28/32/36) so toolbars align on 
 
 Two surfaces, deliberately different investment levels:
 
+**Analytics terminal (`apps.cli.terminal`, M1+)** — the dense screen. One name fully decomposed (returns at six horizons, vol, drawdown, VaR/CVaR, skew/kurtosis, stationarity verdict, Hurst, autocorrelation, vol regime) or a cross-section (correlation, clusters, effective bets, condition number, HRP/ERC weights). Read by scanning columns, not by clicking.
+
+**Prices are back-adjusted here and only here.** The panel stores raw closes because the backtester applies corporate actions to *positions* (§9). Analytics is the opposite case: a 1:1 bonus read from raw closes is a -50% day, which on RELIANCE produced a -49% three-year return, skew -6.9 and kurtosis 175 — every one an artefact. `back_adjust` carries future information and must never reach a backtest; describing what a security did is exactly what it is for.
+
 **Research surface (static HTML reports, M1–M7)** — zero design investment beyond reusing the tokens. Built as `apps/report` + `apps.cli.report`.
 - backtest report · **parameter surface plots** (the mesa-vs-needle check from §5.4) · gauntlet report · data quality report
 

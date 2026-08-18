@@ -22,16 +22,11 @@ from decimal import Decimal
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-import httpx
-
 from core.clock import utc_now
 
-__all__ = ["Alert", "AlertRouter", "AlertSink", "ConsoleSink", "Severity", "TelegramSink"]
+__all__ = ["Alert", "AlertRouter", "AlertSink", "ConsoleSink", "Severity"]
 
 logger = logging.getLogger(__name__)
-
-TELEGRAM_API = "https://api.telegram.org"
-SEND_TIMEOUT_SECONDS = 10.0
 
 
 class Severity(str, Enum):
@@ -81,50 +76,6 @@ class ConsoleSink:
     def send(self, alert: Alert) -> bool:
         logger.warning("ALERT %s: %s", alert.severity.value, alert.title)
         return True
-
-
-@dataclass
-class TelegramSink:
-    """Pushes alerts to a Telegram chat.
-
-    Args:
-        bot_token: From @BotFather.
-        chat_id: Destination chat.
-        client: Injected for testing, so no test ever reaches the network.
-    """
-
-    bot_token: str
-    chat_id: str
-    client: httpx.Client | None = None
-
-    def send(self, alert: Alert) -> bool:
-        if not self.bot_token or not self.chat_id:
-            logger.warning("telegram not configured; alert dropped: %s", alert.title)
-            return False
-
-        client = self.client or httpx.Client(timeout=SEND_TIMEOUT_SECONDS)
-        try:
-            response = client.post(
-                f"{TELEGRAM_API}/bot{self.bot_token}/sendMessage",
-                json={"chat_id": self.chat_id, "text": alert.format()},
-            )
-        except httpx.HTTPError:
-            # Deliberately swallowed. An unreachable alerting API must never
-            # halt a working strategy — see the module docstring.
-            logger.exception("telegram unreachable")
-            return False
-        else:
-            if response.status_code != httpx.codes.OK:
-                logger.error(
-                    "telegram send failed: HTTP %s %s",
-                    response.status_code,
-                    response.text[:200],
-                )
-                return False
-            return True
-        finally:
-            if self.client is None:
-                client.close()
 
 
 @dataclass

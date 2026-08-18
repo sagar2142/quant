@@ -1,63 +1,32 @@
-"""Alert routing from configuration — MASTER_PLAN §M9, §12.7.
+"""Alert routing — MASTER_PLAN §12.7.
 
 One place that decides which channels an alert reaches, so no caller has to
 remember. `ops.alerts` knows *how* to send; this knows *where*.
 
-**The console sink is always present.** A misconfigured Telegram token must
-degrade to a printed alert, never to silence — an alert that vanishes because
-of a typo in an environment variable is worse than no alerting system, because
-you believe you have one.
+**Console only, by design.** Push notification channels were removed: this is a
+research and analysis system, and an alert that interrupts you is the wrong
+shape for work you do at a desk. Anything that halts the account is already
+persisted to state, printed, and returned as a non-zero exit code — three
+records that survive the process, which a notification does not.
 
-**Telegram is the alarm; the console is the record.** §M9 gates live trading on
-having been woken by an alert at least once, and a line in a log file has never
-woken anybody. When the token is absent the router says so out loud at
-construction, rather than at 3am when the position is wrong.
+The router remains because the shape is right: a break must be *reported*
+through a single path rather than printed from wherever it was noticed. Adding
+a channel later means adding a sink here and nothing else.
 """
 
 from __future__ import annotations
 
-import logging
-
-from core.config import Settings, settings
-from ops.alerts import AlertRouter, AlertSink, ConsoleSink, TelegramSink
+from ops.alerts import AlertRouter, AlertSink, ConsoleSink
 
 __all__ = ["build_router", "describe_channels"]
 
-logger = logging.getLogger(__name__)
 
-
-def build_router(config: Settings | None = None) -> AlertRouter:
-    """Every configured channel, console always included.
-
-    Args:
-        config: Injected for testing. Defaults to the process settings.
-    """
-    active = config or settings
+def build_router() -> AlertRouter:
+    """Every channel an alert reaches."""
     sinks: list[AlertSink] = [ConsoleSink()]
-
-    if active.telegram_configured:
-        sinks.append(
-            TelegramSink(
-                bot_token=active.telegram_bot_token,
-                chat_id=active.telegram_chat_id,
-            )
-        )
-    else:
-        logger.warning(
-            "Telegram is not configured — alerts will print and nothing will "
-            "wake you. Set NEUTRON_TELEGRAM_BOT_TOKEN and "
-            "NEUTRON_TELEGRAM_CHAT_ID (§M9)."
-        )
     return AlertRouter(sinks)
 
 
-def describe_channels(config: Settings | None = None) -> str:
-    """One line naming the live channels, for a CLI to print at startup.
-
-    Printed rather than assumed: the operator should know before a bad session
-    whether anything is going to reach them during one.
-    """
-    active = config or settings
-    if active.telegram_configured:
-        return "alerts: console + telegram"
-    return "alerts: console only — nothing will wake you (§M9)"
+def describe_channels() -> str:
+    """One line naming the live channels, for a CLI to print at startup."""
+    return "alerts: console"

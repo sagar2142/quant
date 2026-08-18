@@ -17,7 +17,6 @@ from decimal import Decimal
 import pytest
 
 from apps.cli.paper import announce, persist_outcome
-from core.config import Settings
 from core.instruments import AssetClass, Currency, Exchange, Instrument, InstrumentId
 from engine.accounting import Portfolio
 from ops.alerts import Alert, AlertRouter, Severity
@@ -91,28 +90,14 @@ def blocked_order() -> BlockedOrder:
 
 
 class TestRouterConstruction:
-    def test_console_is_always_present(self):
-        """A misconfigured token must degrade to a printed alert, never to
-        silence — believing you have alerting is worse than knowing you do
-        not."""
-        router = build_router(Settings(telegram_bot_token="", telegram_chat_id=""))
-        assert len(router.sinks) == 1
+    def test_console_is_the_channel(self):
+        """Push channels were removed deliberately. A halt is recorded in state,
+        printed, and returned as a non-zero exit code — three records that
+        survive the process."""
+        assert len(build_router().sinks) == 1
 
-    def test_telegram_is_added_when_configured(self):
-        router = build_router(Settings(telegram_bot_token="t", telegram_chat_id="c"))
-        assert len(router.sinks) == 2
-
-    def test_a_half_configured_telegram_is_not_used(self):
-        """A token with no chat id would fail on every send. Better to say
-        "console only" up front than to fail silently at 3am."""
-        router = build_router(Settings(telegram_bot_token="t", telegram_chat_id=""))
-        assert len(router.sinks) == 1
-
-    def test_channels_are_described_honestly(self):
-        quiet = describe_channels(Settings(telegram_bot_token="", telegram_chat_id=""))
-        assert "nothing will wake you" in quiet
-        loud = describe_channels(Settings(telegram_bot_token="t", telegram_chat_id="c"))
-        assert "telegram" in loud
+    def test_channels_are_described(self):
+        assert describe_channels() == "alerts: console"
 
 
 class TestPaperLoopRaisesAlerts:

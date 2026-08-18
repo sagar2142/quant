@@ -44,6 +44,12 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 # Backtest + gauntlet as one self-contained HTML file you can keep
 .\.venv\Scripts\python.exe -m apps.cli.report --top 30 --out reports\momentum.html
 
+# Analytics terminal — one name, fully decomposed
+.\.venv\Scripts\python.exe -m apps.cli.terminal RELIANCE
+
+# ...or a cross-section: correlation, clusters, effective bets, HRP/ERC weights
+.\.venv\Scripts\python.exe -m apps.cli.terminal RELIANCE TCS INFY HDFCBANK --sessions 750
+
 # Data quality report; exits non-zero on any CRITICAL finding
 .\.venv\Scripts\python.exe -m apps.cli.quality
 
@@ -67,7 +73,7 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 |---|---|
 | `core/` | Shared kernel: clocks, instruments, calendars, events. Depends on nothing. |
 | `data/` | Feeds, Parquet lake, quality checks, point-in-time universes. |
-| `quant/` | Mathematics, features, strategies. **Never imports `trading/`.** |
+| `quant/` | Mathematics, analytics, strategies. **Never imports `trading/`.** |
 | `engine/` | Backtester, cost models, validation gauntlet, experiment registry. |
 | `trading/` | Portfolio, risk, paper, execution, reconciliation. |
 | `ai/` | Research agents. No import path to `trading/` or secrets. M13+. |
