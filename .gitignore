@@ -1,0 +1,59 @@
+# ── secrets: never, under any circumstance ───────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+*.enc.yaml.dec
+
+# ── market data & artifacts: large, regenerable, licence-bound ───────────────
+# NSE bhavcopy is for personal use (§32); pushing it would redistribute it.
+lake/
+data_lake/
+backfill.log
+*.parquet
+*.arrow
+*.duckdb
+*.duckdb.wal
+artifacts/
+runs/
+
+# ── notebooks: output stripped, but never commit checkpoints ─────────────────
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# ── python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ── node / frontend ──────────────────────────────────────────────────────────
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+*.tsbuildinfo
+
+# ── tauri ────────────────────────────────────────────────────────────────────
+apps/web/src-tauri/target/
+
+# ── os / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json

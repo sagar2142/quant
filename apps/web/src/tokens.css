@@ -1,0 +1,195 @@
+/* Design tokens — MASTER_PLAN §12.2, §12.3, §12.4.
+ *
+ * The single source of colour, type and spacing. Tailwind's default palette is
+ * REPLACED by these (not extended), so `bg-blue-500` is a compile error and an
+ * off-system colour cannot reach the screen by accident. That substitution is
+ * what makes Part 12 a specification rather than an aspiration.
+ *
+ * ~85% of any screen is neutral. Colour is semantic or it is absent. */
+
+:root {
+  /* ── neutrals: structure ────────────────────────────────────────────── */
+  --bg-base: #0b0d10;
+  --bg-surface: #13161a;
+  --bg-elevated: #1a1e24;
+  --bg-inset: #080a0c;
+  --border: #252a31;
+  --border-strong: #363c45;
+  --text-primary: #e6e9ed;
+  --text-secondary: #98a1ac;
+  --text-tertiary: #5e6772;
+
+  /* ── semantics: the only saturated colours permitted ────────────────────
+   * Not pure #00FF00/#FF0000. Saturated primaries vibrate against a dark
+   * background, cause afterimages and fatigue the eye within an hour. These
+   * are desaturated enough to stare at all day and distinct enough to read
+   * instantly. */
+  --profit: #26a69a;
+  --loss: #ef5350;
+  --warn: #f0a93b;
+  --critical: #ff4d4f;
+  --accent: #4a9eff;
+  --neutral-flat: #98a1ac;
+
+  /* ── typography (§12.3) ─────────────────────────────────────────────── */
+  --font-ui: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  /* ── spacing: 4px base, nothing else (§12.4) ────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ── control heights. Desktop scale, not consumer scale. ────────────── */
+  --control-xs: 24px;
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+  --control-danger: 40px;
+
+  --row-dense: 24px;
+  --row-default: 28px;
+  --row-comfortable: 32px;
+
+  --shell-vitals: 40px;
+  --shell-status: 24px;
+  --shell-nav: 48px;
+  --panel-header: 28px;
+
+  /* Nothing rounder. Quant software is precise, not friendly. */
+  --radius-control: 2px;
+  --radius-panel: 4px;
+
+  /* ── z-index: fixed scale, no ad-hoc values (§12.12) ────────────────── */
+  --z-content: 0;
+  --z-sticky-header: 10;
+  --z-chrome: 20;
+  --z-popover: 100;
+  --z-modal: 200;
+  --z-toast: 300;
+  --z-kill-confirm: 999;
+
+  /* ── motion (§12.5). Nothing over 200ms, anywhere. ──────────────────── */
+  --transition: 120ms ease-out;
+  --flash-duration: 150ms;
+}
+
+/* Colourblind mode. ~8% of men have red-green deficiency.
+ * The toggle is the convenience; the real fix is that every P&L number carries
+ * an explicit +/- sign and every direction a glyph, so colour is never the sole
+ * encoding of anything. */
+:root[data-colourblind="true"] {
+  --profit: #4a9eff;
+  --loss: #ff9f43;
+}
+
+/* Light theme, for daylight and printing. */
+:root[data-theme="light"] {
+  --bg-base: #ffffff;
+  --bg-surface: #f7f8fa;
+  --bg-elevated: #ffffff;
+  --bg-inset: #edeff2;
+  --border: #e2e5e9;
+  --border-strong: #c8cdd4;
+  --text-primary: #14171a;
+  --text-secondary: #5a636d;
+  --text-tertiary: #8a929b;
+  --profit: #0b7a6e;
+  --loss: #c0392b;
+  --warn: #b87413;
+  --critical: #d32029;
+  --accent: #0b6bcb;
+  --neutral-flat: #5a636d;
+}
+
+/* ── reset ─────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  /* The shell is exactly 100vh and never scrolls. Panels scroll internally
+   * (§12.9); a console that page-scrolls is a website pretending to be an
+   * instrument. */
+  overflow: hidden;
+}
+
+/* Every number, everywhere. Misaligned digits are a bug (§12.3). */
+.num,
+td.num,
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Value flash on update: how a fill is seen landing without watching the
+ * number. Never an animated count — a rolling number cannot be read. */
+@keyframes flash-profit {
+  from {
+    background: color-mix(in srgb, var(--profit) 12%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@keyframes flash-loss {
+  from {
+    background: color-mix(in srgb, var(--loss) 12%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.flash-up {
+  animation: flash-profit var(--flash-duration) ease-out;
+}
+
+.flash-down {
+  animation: flash-loss var(--flash-duration) ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* The flash is replaced, not merely disabled: the information it carried
+   * still needs somewhere to go. */
+  .flash-up {
+    border-left: 2px solid var(--profit);
+  }
+
+  .flash-down {
+    border-left: 2px solid var(--loss);
+  }
+}

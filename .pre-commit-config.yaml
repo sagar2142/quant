@@ -1,0 +1,62 @@
+# MASTER_PLAN §14.8 — the tooling is the code reviewer.
+# Install once:  pre-commit install
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=512]          # market data belongs in the lake, not git
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: detect-private-key
+
+  # Secrets must never reach a commit (§14.10)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Notebooks are committed without output (§14.10)
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic>=2.8, types-requests]
+        args: [--config-file=pyproject.toml]
+        files: ^(core|data|quant|engine|trading|ops)/
+
+  - repo: local
+    hooks:
+      - id: neutron-lints
+        name: neutron AST lints (MASTER_PLAN §14.8)
+        entry: python -m tools.lints
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: import-linter
+        name: architecture boundaries (MASTER_PLAN §3.2)
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        always_run: true

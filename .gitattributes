@@ -1,0 +1,14 @@
+# LF in the repository regardless of platform. The GitHub Actions runner is
+# Linux; letting Windows check in CRLF would make every file appear modified
+# on the runner and churn diffs forever.
+* text=auto eol=lf
+
+# Windows scripts that genuinely want CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary — never rewrite
+*.pdf binary
+*.parquet binary
+*.png binary
+*.ico binary

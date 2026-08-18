@@ -1,0 +1,374 @@
+/* App shell and panel system — MASTER_PLAN §12.9, §12.10.
+ *
+ * The shell is exactly 100vh and never scrolls. Panels scroll internally.
+ *
+ * At 1440x900: 900 - 40 (vitals) - 24 (status) = 836px of workspace. Every
+ * pixel is accounted for. */
+
+.shell {
+  display: grid;
+  grid-template-rows: var(--shell-vitals) 1fr var(--shell-status);
+  height: 100vh;
+  /* Without this, a tall child refuses to shrink and the shell scrolls —
+   * the number-one cause of broken panel layouts (§12.12). */
+  min-height: 0;
+}
+
+.shell-body {
+  display: grid;
+  grid-template-columns: var(--shell-nav) 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── vitals bar (§12.7) ─────────────────────────────────────────────────── */
+
+.vitals {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--shell-vitals);
+  padding: 0 var(--space-3);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  z-index: var(--z-chrome);
+}
+
+.vitals .feeds {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.vitals .feed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.vitals .dot {
+  font-size: 10px;
+}
+
+.vitals .feed-name {
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+
+.vitals .divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+}
+
+.vitals .spacer {
+  flex: 1;
+}
+
+.vitals .pnl-pct {
+  margin-left: var(--space-2);
+  color: var(--text-secondary);
+}
+
+/* Ladder meter: filled blocks are engaged rungs. */
+.ladder {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.rung {
+  width: 10px;
+  height: 10px;
+  border-radius: 1px;
+}
+
+.rung-off {
+  background: var(--border-strong);
+}
+
+.rung-on {
+  background: var(--warn);
+}
+
+/* ── kill switch: deliberately oversized (§12.4) ────────────────────────── */
+
+.kill {
+  height: var(--control-danger);
+  padding: 0 var(--space-6);
+  background: var(--critical);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-control);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: filter var(--transition);
+}
+
+.kill:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.kill:disabled {
+  background: var(--border-strong);
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+.kill-confirm {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.kill-confirm input {
+  height: var(--control-danger);
+  width: 240px;
+  padding: 0 var(--space-3);
+  background: var(--bg-inset);
+  border: 1px solid var(--critical);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.kill-engaged {
+  height: var(--control-danger);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-6);
+  background: var(--critical);
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border-radius: var(--radius-control);
+}
+
+/* ── nav rail ───────────────────────────────────────────────────────────── */
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+
+.nav button {
+  height: var(--control-md);
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+
+.nav button:hover {
+  color: var(--text-primary);
+}
+
+.nav button[aria-current="page"] {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border-left-color: var(--accent);
+}
+
+/* ── workspace and panels (§12.10) ──────────────────────────────────────── */
+
+/* No gutters. The 1px gap IS the divider, which avoids double borders and
+ * alignment drift entirely. */
+.workspace {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace.master-detail {
+  grid-template-columns: 320px 1fr;
+}
+
+.workspace.chart-over-table {
+  grid-template-rows: 60% 40%;
+}
+
+.workspace.grid-2x2 {
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--panel-header);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3);
+}
+
+/* Tables and charts bleed to the panel edge. A table inside 12px of padding
+ * wastes 24px horizontally and reads as a floating slab (§12.10). */
+.panel-body.flush {
+  padding: 0;
+}
+
+.panel-footer {
+  height: var(--shell-status);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* ── tables ─────────────────────────────────────────────────────────────── */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky-header);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 var(--space-2);
+  height: var(--row-default);
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+thead th.num {
+  text-align: right;
+}
+
+tbody td {
+  height: var(--row-default);
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+tbody tr:hover {
+  background: var(--bg-elevated);
+}
+
+/* ── status bar ─────────────────────────────────────────────────────────── */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--shell-status);
+  padding: 0 var(--space-3);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  z-index: var(--z-chrome);
+}
+
+/* Not cosmetic. This is what stops a test order being fired into production. */
+.env-badge {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.env-dev {
+  background: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.env-paper {
+  background: var(--warn);
+  color: #000;
+}
+
+.env-live {
+  background: var(--critical);
+  color: #fff;
+}
+
+/* ── semantic text ──────────────────────────────────────────────────────── */
+
+.text-profit {
+  color: var(--profit);
+}
+.text-loss {
+  color: var(--loss);
+}
+.text-warn {
+  color: var(--warn);
+}
+.text-critical {
+  color: var(--critical);
+}
+.text-flat {
+  color: var(--neutral-flat);
+}
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+/* Empty states are one line, not an illustration with 200px of padding. */
+.empty {
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* ── breakpoints: at 2560 show MORE data, never bigger data (§12.12) ────── */
+
+@media (max-width: 1279px) {
+  .workspace.master-detail {
+    grid-template-columns: 260px 1fr;
+  }
+}
+
+@media (min-width: 1600px) {
+  .workspace.master-detail {
+    grid-template-columns: 380px 1fr;
+  }
+}

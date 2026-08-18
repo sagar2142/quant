@@ -1,0 +1,76 @@
+; Architecture boundaries — MASTER_PLAN §3.2
+; These are not style preferences. Each contract prevents a specific class of
+; correctness or safety failure. CI fails on violation.
+
+[importlinter]
+root_packages =
+    core
+    data
+    quant
+    engine
+    trading
+    ai
+    ops
+    apps
+include_external_packages = True
+
+
+[importlinter:contract:layers]
+name = Layered architecture — dependencies point downward only
+type = layers
+layers =
+    apps
+    trading
+    engine
+    quant
+    data
+    core
+; core knows nothing about anything. data knows nothing downstream of it.
+; A violation here means a lower layer reached upward, which is how
+; look-ahead bias and circular state creep in.
+
+
+[importlinter:contract:research-never-trades]
+name = Research plane must not import the trading plane
+type = forbidden
+source_modules =
+    quant
+    engine
+forbidden_modules =
+    trading
+; Research code must be incapable of placing an order or reading a live
+; position, regardless of what a future bug or generated strategy attempts.
+
+
+[importlinter:contract:ai-is-sandboxed]
+name = AI plane must not import trading, execution, or secrets
+type = forbidden
+source_modules =
+    ai
+forbidden_modules =
+    trading
+    core.secrets
+; MASTER_PLAN Appendix B: production credentials never enter AI research.
+
+
+[importlinter:contract:risk-is-independent]
+name = Risk engine must not import strategies it polices
+type = forbidden
+source_modules =
+    trading.risk
+forbidden_modules =
+    quant.strategies
+    engine.backtest
+; A risk engine that shares code with the strategy can share its bugs and its
+; assumptions. Independence is the entire point of the component.
+
+
+[importlinter:contract:data-is-downstream-blind]
+name = Data layer must not import execution or portfolio state
+type = forbidden
+source_modules =
+    data
+forbidden_modules =
+    trading
+    engine
+; Data must never be shaped by what the trader wants it to say.
