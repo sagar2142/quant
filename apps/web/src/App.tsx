@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Analytics } from "./components/Analytics";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import {
   directionGlyph,
@@ -25,10 +26,11 @@ import {
 import "./tokens.css";
 import "./shell.css";
 
-type Screen = "overview" | "positions" | "blotter" | "risk" | "reconcile";
+type Screen = "overview" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
 
 const SCREENS: { id: Screen; label: string; icon: string; key: string }[] = [
   { id: "overview", label: "Overview", icon: "◧", key: "o" },
+  { id: "analytics", label: "Analytics", icon: "∿", key: "a" },
   { id: "positions", label: "Positions", icon: "▤", key: "p" },
   { id: "blotter", label: "Blotter", icon: "▦", key: "b" },
   { id: "risk", label: "Risk", icon: "▲", key: "r" },
@@ -313,6 +315,11 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "analytics" ? (
+              <Panel title="Analytics" flush>
+                <Analytics />
+              </Panel>
+            ) : null}
             {screen === "positions" ? (
               <Panel title="Positions" flush footer={`${state.positions.length} open`}>
                 <PositionsTable positions={state.positions} />

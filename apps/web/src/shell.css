@@ -372,3 +372,179 @@ tbody tr:hover {
     grid-template-columns: 380px 1fr;
   }
 }
+
+/* ── analytics screens (§12.6, §12.10) ──────────────────────────────────────
+ * Dense: a quant screen is read by scanning columns, so figures sit close
+ * enough to compare without moving your eyes across whitespace. */
+
+.analytics {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  height: 100%;
+}
+
+.analytics-bar {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.analytics-input {
+  flex: 1;
+  height: var(--control-md);
+  padding: 0 var(--space-3);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.analytics-input:focus,
+.analytics-select:focus,
+.analytics-run:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.analytics-select {
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.analytics-run {
+  height: var(--control-md);
+  min-width: 64px;
+  padding: 0 var(--space-4);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.analytics-run:hover:not(:disabled) { border-color: var(--accent); }
+.analytics-run:disabled { opacity: 0.5; cursor: default; }
+
+.analytics-body {
+  overflow-y: auto;
+  padding: var(--space-4);
+  min-height: 0;
+}
+
+.analytics-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.analytics-symbol {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.analytics-last {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+
+.stat { background: var(--bg-surface); padding: var(--space-2) var(--space-3); }
+
+.stat-label {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.analytics-block { background: var(--bg-surface); padding: var(--space-3); }
+
+.analytics-block h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.analytics-block dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px var(--space-3);
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.analytics-block dt { color: var(--text-secondary); }
+
+.analytics-block dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.analytics-subhead {
+  margin: var(--space-6) 0 var(--space-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.analytics-note {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid currentColor;
+  background: var(--bg-surface);
+  font-size: 12.5px;
+}
+
+/* Correlation shading. Semantic, not decorative: the eye should find the
+ * strongly-coupled pairs without reading every cell. */
+.corr td { font-size: 11.5px; }
+.corr-self { color: var(--text-tertiary); }
+.corr-high { background: rgba(239, 83, 80, 0.18); color: var(--text-primary); }
+.corr-mid  { background: rgba(240, 169, 59, 0.12); }
+.corr-low  { color: var(--text-secondary); }

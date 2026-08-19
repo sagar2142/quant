@@ -24,6 +24,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from apps.api.analytics import build_analytics_router
 from core.clock import utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
@@ -83,6 +84,10 @@ def create_app(
         version="0.1.0",
         docs_url="/docs",
     )
+    # Analytics is read-only and shares its implementation with
+    # `apps.cli.terminal`, so the console and the terminal cannot disagree
+    # about what a security is.
+    app.include_router(build_analytics_router())
 
     @app.get("/health")
     def health() -> dict[str, object]:
