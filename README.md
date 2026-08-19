@@ -44,6 +44,10 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 # Backtest + gauntlet as one self-contained HTML file you can keep
 .\.venv\Scripts\python.exe -m apps.cli.report --top 30 --out reports\momentum.html
 
+# Screen the whole universe — which names, not what is this name
+.\.venv\Scripts\python.exe -m apps.cli.screen --sort momentum --limit 20
+.\.venv\Scripts\python.exe -m apps.cli.screen --stationary-only
+
 # Analytics terminal — one name, fully decomposed
 .\.venv\Scripts\python.exe -m apps.cli.terminal RELIANCE
 

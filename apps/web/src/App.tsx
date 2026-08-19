@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Analytics } from "./components/Analytics";
+import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import {
   directionGlyph,
@@ -26,10 +27,11 @@ import {
 import "./tokens.css";
 import "./shell.css";
 
-type Screen = "overview" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
+type Screen = "overview" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
 
 const SCREENS: { id: Screen; label: string; icon: string; key: string }[] = [
   { id: "overview", label: "Overview", icon: "◧", key: "o" },
+  { id: "screener", label: "Screener", icon: "⌗", key: "s" },
   { id: "analytics", label: "Analytics", icon: "∿", key: "a" },
   { id: "positions", label: "Positions", icon: "▤", key: "p" },
   { id: "blotter", label: "Blotter", icon: "▦", key: "b" },
@@ -260,6 +262,9 @@ export function App({
   onKill: (reason: string) => void;
 }) {
   const [screen, setScreen] = useState<Screen>("overview");
+  // Set when a screener row is clicked, so the analytics screen opens on that
+  // name. Keyed on the component so it remounts and refetches.
+  const [picked, setPicked] = useState<string | null>(null);
 
   // Keyboard-first: `g` then a letter. The mouse is optional (§12.8).
   const handleKey = useCallback((event: KeyboardEvent) => {
@@ -315,9 +320,19 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "screener" ? (
+              <Panel title="Screener" flush>
+                <Screener
+                  onPick={(symbol) => {
+                    setPicked(symbol);
+                    setScreen("analytics");
+                  }}
+                />
+              </Panel>
+            ) : null}
             {screen === "analytics" ? (
               <Panel title="Analytics" flush>
-                <Analytics />
+                <Analytics key={picked ?? "default"} initialSymbols={picked ?? undefined} />
               </Panel>
             ) : null}
             {screen === "positions" ? (

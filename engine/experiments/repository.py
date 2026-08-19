@@ -47,9 +47,8 @@ from engine.experiments.registry import (
     ExperimentRecord,
     Hypothesis,
     HypothesisStatus,
-    Rejection,
 )
-from engine.validation.report import GauntletResult
+from engine.experiments.results import ResultsMixin
 
 __all__ = [
     "DatasetVersion",
@@ -64,7 +63,7 @@ __all__ = [
 _EXPERIMENT_SAVEPOINT = "neutron_experiment_write"
 
 
-class ExperimentRepository:
+class ExperimentRepository(ResultsMixin):
     """Reads and writes the research tables.
 
     Args:
@@ -112,6 +111,53 @@ class ExperimentRepository:
                 ],
             )
         return hypothesis.hypothesis_id
+
+    def ensure_hypothesis(self, hypothesis: Hypothesis) -> uuid.UUID:
+        """Register the hypothesis, or accept that it already exists.
+
+        Idempotent because a standing hypothesis — the exploratory one in
+        particular — is re-used across sessions. `register_hypothesis` stays
+        strict: a genuine pre-registration should fail loudly if it collides.
+        """
+        row = hypothesis.to_row()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO hypotheses (
+                    hypothesis_id, statement, economic_mechanism, prediction,
+                    success_criteria, kill_criteria,
+                    dev_start, dev_end, val_start, val_end, test_start, test_end,
+                    status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (hypothesis_id) DO NOTHING
+                """,
+                [
+                    row["hypothesis_id"],
+                    row["statement"],
+                    row["economic_mechanism"],
+                    row["prediction"],
+                    row["success_criteria"],
+                    row["kill_criteria"],
+                    row["dev_start"],
+                    row["dev_end"],
+                    row["val_start"],
+                    row["val_end"],
+                    row["test_start"],
+                    row["test_end"],
+                    row["status"],
+                ],
+            )
+        return hypothesis.hypothesis_id
+
+    def ensure_dataset(self, dataset_id: str, name: str, source: str) -> str:
+        """The parent row a dataset version hangs off. Idempotent."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO datasets (dataset_id, name, source) VALUES (%s, %s, %s) "
+                "ON CONFLICT (dataset_id) DO NOTHING",
+                [dataset_id, name, source],
+            )
+        return dataset_id
 
     def trials_for(self, hypothesis_id: uuid.UUID) -> int:
         """Current trial count, as maintained by the database trigger.
@@ -230,102 +276,6 @@ class ExperimentRepository:
                 json.dumps({"fingerprint": experiment.fingerprint()}),
             ],
         )
-
-    def record_metrics(self, experiment_id: uuid.UUID, metrics: dict[str, Any]) -> None:
-        """Attach performance metrics to an experiment.
-
-        `deflated_sharpe` and `pbo` are left NULL until the gauntlet runs; the
-        schema allows that on purpose, because a metrics row that pretends to
-        carry overfitting statistics it never computed is worse than a NULL.
-        """
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO backtest_metrics (
-                    experiment_id, total_return, cagr, sharpe, sortino,
-                    max_drawdown, volatility, turnover, hit_rate, n_trades,
-                    cost_drag_bps, deflated_sharpe, pbo
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                [
-                    str(experiment_id),
-                    metrics["total_return"],
-                    metrics["cagr"],
-                    metrics["sharpe"],
-                    metrics.get("sortino"),
-                    metrics["max_drawdown"],
-                    metrics["volatility"],
-                    metrics["turnover"],
-                    metrics.get("hit_rate"),
-                    metrics["n_trades"],
-                    metrics["cost_drag_bps"],
-                    metrics.get("deflated_sharpe"),
-                    metrics.get("pbo"),
-                ],
-            )
-
-    def record_gauntlet(self, experiment_id: uuid.UUID, result: GauntletResult) -> None:
-        """Record one gauntlet check. Re-running a check overwrites its result.
-
-        Takes the check's own result object rather than loose fields, so the
-        persisted row cannot drift from what the gauntlet actually reported.
-
-        The UNIQUE constraint makes the upsert explicit rather than letting a
-        second run quietly append a second, contradictory verdict for the same
-        check. A skipped check is stored as a failure with its reason: an
-        unfilled slot must never read as a pass (§5.4).
-        """
-        detail: dict[str, Any] = {"reason": result.reason, "skipped": result.skipped}
-        test_name, passed = result.test, result.passed and not result.skipped
-        statistic, threshold = result.statistic, result.threshold
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO gauntlet_results (
-                    experiment_id, test_name, passed, statistic, threshold, detail
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (experiment_id, test_name) DO UPDATE SET
-                    passed = EXCLUDED.passed,
-                    statistic = EXCLUDED.statistic,
-                    threshold = EXCLUDED.threshold,
-                    detail = EXCLUDED.detail,
-                    run_at = now()
-                """,
-                [
-                    str(experiment_id),
-                    test_name,
-                    passed,
-                    statistic,
-                    threshold,
-                    json.dumps(detail),
-                ],
-            )
-
-    # ── rejection log ───────────────────────────────────────────────────────
-
-    def record_rejection(self, rejection: Rejection) -> None:
-        """Write a killed idea to the log (§5.5).
-
-        Patterns across these rows are worth more than any single entry: if
-        every mean-reversion idea dies on cost sensitivity, that says something
-        about the holding period, not about mean reversion.
-        """
-        row = rejection.to_row()
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO rejection_log (
-                    hypothesis_id, experiment_id, killed_at_stage, reason, lesson
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                [
-                    row["hypothesis_id"],
-                    row["experiment_id"],
-                    row["killed_at_stage"],
-                    row["reason"],
-                    row["lesson"],
-                ],
-            )
 
     # ── dataset versions ────────────────────────────────────────────────────
 

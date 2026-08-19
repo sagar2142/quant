@@ -110,6 +110,9 @@ ignore = [
 "tests/**"       = ["S", "PLR2004", "ARG", "DTZ", "PLC0415", "C408"]
 "apps/cli/**"    = ["T20"]         # a CLI's output IS its interface
 "tools/lints/**" = ["T20"]         # lint CLI prints diagnostics by design
+# ops/db tells the operator why a run went unrecorded. That has to reach the
+# console: a silently skipped recording is an uncounted trial (§5.2).
+"ops/db.py"      = ["T20"]
 # A strategy's constructor parameters ARE its specification — they are already
 # captured verbatim in StrategySpec.parameters and validated in __post_init__.
 # Wrapping them in a second config object would duplicate that with no added

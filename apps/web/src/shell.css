@@ -548,3 +548,61 @@ tbody tr:hover {
 .corr-high { background: rgba(239, 83, 80, 0.18); color: var(--text-primary); }
 .corr-mid  { background: rgba(240, 169, 59, 0.12); }
 .corr-low  { color: var(--text-secondary); }
+
+/* ── screener and charts ────────────────────────────────────────────────── */
+
+.analytics-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.analytics-spacer { flex: 1; }
+
+.clickable { cursor: pointer; }
+.clickable:hover { background: var(--bg-elevated); }
+
+.flags { white-space: nowrap; }
+
+.tag {
+  display: inline-block;
+  padding: 1px 5px;
+  margin-right: 3px;
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.tag-ok   { background: rgba(38, 166, 154, 0.18); color: var(--profit); }
+.tag-warn { background: rgba(240, 169, 59, 0.18); color: var(--warn); }
+.tag-loss { background: rgba(239, 83, 80, 0.18); color: var(--loss); }
+
+.chart-stack {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+
+.chart-wrap {
+  background: var(--bg-surface);
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.chart-label {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  height: 110px;
+}

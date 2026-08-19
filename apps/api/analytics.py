@@ -21,14 +21,22 @@ from functools import lru_cache
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
 
+from apps.api.schemas import (
+    CrossSectionResponse,
+    HorizonReturn,
+    NameRow,
+    ScreenResponse,
+    ScreenRowResponse,
+    SecurityResponse,
+)
 from apps.cli.terminal import aligned_returns, load_actions, series_for
 from core.clock import as_decision_time, utc_now
 from core.config import settings
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from quant.analytics.crosssection import analyse_cross_section
+from quant.analytics.screener import ScreenCriteria, SortKey, screen_universe
 from quant.analytics.security import profile_security
 
 __all__ = ["build_analytics_router"]
@@ -45,87 +53,6 @@ MIN_CROSS_SECTION = 2
 
 #: Trailing window used to rank the symbol search by liquidity.
 LIQUIDITY_WINDOW = 60
-
-
-class HorizonReturn(BaseModel):
-    label: str
-    value: float | None
-
-
-class SecurityResponse(BaseModel):
-    """One security, fully decomposed. Mirrors `SecurityProfile`."""
-
-    symbol: str
-    observations: int
-    last_close: float
-
-    horizons: list[HorizonReturn]
-    cagr: float
-    high_52w: float
-    low_52w: float
-    off_high: float
-
-    annual_volatility: float
-    max_drawdown: float
-    current_drawdown: float
-    adv_value: float | None
-
-    sharpe: float
-    sortino: float
-    calmar: float
-    hit_rate: float
-
-    skewness: float
-    kurtosis: float
-    var_5: float
-    cvar_5: float
-    tail_ratio: float
-
-    verdict: str
-    adf_pvalue: float
-    kpss_pvalue: float
-    hurst: float
-    tradable_as_mean_reversion: bool
-    autocorrelation: dict[str, float]
-
-    realised_vol: float
-    ewma_vol: float
-    vol_regime: str
-
-    is_implausible: bool
-    fat_left_tail: bool
-
-
-class NameRow(BaseModel):
-    symbol: str
-    total_return: float
-    annual_volatility: float
-    sharpe: float
-    beta: float
-    correlation_to_market: float
-    weight_hrp: float
-    weight_erc: float
-    cluster: int
-
-
-class CrossSectionResponse(BaseModel):
-    names: list[NameRow]
-    sessions: int
-    mean_correlation: float
-    clusters: int
-    effective_bets: float
-    diversification_ratio: float
-    condition_number: float
-    shrinkage: float
-    market_return: float
-    market_volatility: float
-    is_ill_conditioned: bool
-    concentration_warning: str | None
-    #: Row/column order of `correlation`. Carried explicitly because `names` is
-    #: ranked by return while the matrix keeps input order — indexing one by
-    #: the other would render a heatmap of the wrong pairs.
-    correlation_labels: list[str]
-    correlation: list[list[float]]
 
 
 @lru_cache(maxsize=1)
@@ -299,6 +226,68 @@ def _register_cross_section(router: APIRouter) -> None:
         )
 
 
+def _register_screen(router: APIRouter) -> None:
+    @router.get("/screen", response_model=ScreenResponse)
+    def screen(
+        sort: str = Query("liquidity"),
+        limit: int = Query(25, ge=1, le=200),
+        window: int = Query(250, ge=60),
+        min_adv: float = Query(1e7, ge=0),
+        stationary_only: bool = Query(default=False),
+    ) -> ScreenResponse:
+        """Which names, rather than what is this name.
+
+        Two-stage by construction: the vectorised filter runs over every symbol
+        in a fraction of a second, and only the shortlist pays for ADF, KPSS
+        and Hurst.
+        """
+        try:
+            key = SortKey(sort)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"unknown sort {sort!r}") from exc
+
+        result = screen_universe(
+            _panel(),
+            ScreenCriteria(
+                window=window,
+                min_adv=min_adv,
+                sort_by=key,
+                limit=limit,
+                stationary_only=stationary_only,
+            ),
+        )
+        rows = []
+        for row in result.rows:
+            profile = row.profile
+            if profile is None:
+                continue
+            rows.append(
+                ScreenRowResponse(
+                    symbol=row.symbol,
+                    adv=row.adv,
+                    bars=row.bars,
+                    last_close=row.last_close,
+                    window_return=row.window_return,
+                    annual_volatility=profile.annual_volatility,
+                    sharpe=profile.sharpe,
+                    max_drawdown=profile.max_drawdown,
+                    hurst=profile.stationarity.hurst,
+                    verdict=row.verdict,
+                    fadeable=row.fadeable,
+                    is_implausible=profile.is_implausible,
+                    fat_left_tail=profile.fat_left_tail,
+                )
+            )
+        return ScreenResponse(
+            rows=rows,
+            considered=result.considered,
+            passed_filters=result.passed_filters,
+            profiled=result.profiled,
+            suspected_actions=result.suspected_actions,
+            sort_by=key.value,
+        )
+
+
 def build_analytics_router() -> APIRouter:
     """Every analytics endpoint, registered onto one router.
 
@@ -310,4 +299,5 @@ def build_analytics_router() -> APIRouter:
     _register_search(router)
     _register_security(router)
     _register_cross_section(router)
+    _register_screen(router)
     return router

@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { formatPercent, formatPrice, formatRatio, signClass } from "../format";
+import { DrawdownChart, PriceChart } from "./Sparkline";
 
 export interface Horizon {
   label: string;
@@ -124,7 +125,7 @@ function Stat({
   );
 }
 
-function SecurityScreen({ data }: { data: Security }) {
+function SecurityScreen({ data, closes }: { data: Security; closes: number[] }) {
   const ac = data.autocorrelation;
   return (
     <>
@@ -147,6 +148,19 @@ function SecurityScreen({ data }: { data: Security }) {
         ))}
         <Stat label="CAGR" value={formatPercent(data.cagr)} tone={signClass(data.cagr)} />
       </div>
+
+      {closes.length > 1 ? (
+        <div className="chart-stack">
+          <div className="chart-wrap">
+            <span className="chart-label">price (back-adjusted)</span>
+            <PriceChart closes={closes} label={data.symbol} />
+          </div>
+          <div className="chart-wrap">
+            <span className="chart-label">drawdown from peak</span>
+            <DrawdownChart closes={closes} />
+          </div>
+        </div>
+      ) : null}
 
       <div className="analytics-grid">
         <section className="analytics-block">
@@ -340,10 +354,19 @@ function CrossSectionScreen({ data }: { data: CrossSection }) {
   );
 }
 
-export function Analytics({ apiBase = "/api" }: { apiBase?: string }) {
-  const [input, setInput] = useState("RELIANCE TCS INFY HDFCBANK ICICIBANK SBIN");
+export function Analytics({
+  apiBase = "/api",
+  initialSymbols,
+}: {
+  apiBase?: string;
+  initialSymbols?: string;
+}) {
+  const [input, setInput] = useState(
+    initialSymbols ?? "RELIANCE TCS INFY HDFCBANK ICICIBANK SBIN",
+  );
   const [sessions, setSessions] = useState(750);
   const [security, setSecurity] = useState<Security | null>(null);
+  const [closes, setCloses] = useState<number[]>([]);
   const [section, setSection] = useState<CrossSection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -360,6 +383,11 @@ export function Analytics({ apiBase = "/api" }: { apiBase?: string }) {
       );
       setSecurity(profile);
 
+      const curve = await fetchJson<{ closes: number[] }>(
+        `${apiBase}/security/${symbols[0]}/series?sessions=${sessions}`,
+      );
+      setCloses(curve.closes);
+
       if (symbols.length > 1) {
         setSection(
           await fetchJson<CrossSection>(
@@ -373,6 +401,7 @@ export function Analytics({ apiBase = "/api" }: { apiBase?: string }) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setSecurity(null);
       setSection(null);
+      setCloses([]);
     } finally {
       setLoading(false);
     }
@@ -422,7 +451,7 @@ export function Analytics({ apiBase = "/api" }: { apiBase?: string }) {
       {error ? <div className="analytics-note text-critical">{error}</div> : null}
 
       <div className="analytics-body">
-        {security ? <SecurityScreen data={security} /> : null}
+        {security ? <SecurityScreen data={security} closes={closes} /> : null}
         {section ? (
           <>
             <h3 className="analytics-subhead">

@@ -27,13 +27,8 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from apps.cli.validate import (
-    NSE_SESSIONS,
-    Panel,
-    assemble_inputs,
-    load_market,
-    run_one,
-)
+from apps.cli.runs import NSE_SESSIONS, Panel, run_one
+from apps.cli.validate import assemble_inputs, load_market
 from apps.report.charts import PALETTE, Series, area_chart, bar_chart, line_chart
 from apps.report.page import (
     Panel as Block,
