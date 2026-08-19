@@ -13,6 +13,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Analytics } from "./components/Analytics";
+import { Factors } from "./components/Factors";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import {
@@ -27,7 +28,7 @@ import {
 import "./tokens.css";
 import "./shell.css";
 
-type Screen = "overview" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
+type Screen = "overview" | "factors" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
 
 const SCREENS: {
   id: Screen;
@@ -36,6 +37,7 @@ const SCREENS: {
   key: string;
   group: "Analysis" | "Operations";
 }[] = [
+  { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
   { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
   { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
   { group: "Operations", id: "overview", label: "Overview", icon: "◧", key: "o" },
@@ -267,7 +269,7 @@ export function App({
   state: ConsoleState;
   onKill: (reason: string) => void;
 }) {
-  const [screen, setScreen] = useState<Screen>("analytics");
+  const [screen, setScreen] = useState<Screen>("factors");
   // Set when a screener row is clicked, so the analytics screen opens on that
   // name. Keyed on the component so it remounts and refetches.
   const [picked, setPicked] = useState<string | null>(null);
@@ -332,6 +334,11 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "factors" ? (
+              <Panel title="Factor research" flush>
+                <Factors />
+              </Panel>
+            ) : null}
             {screen === "screener" ? (
               <Panel title="Screener" flush>
                 <Screener

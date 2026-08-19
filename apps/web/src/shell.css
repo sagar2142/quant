@@ -639,3 +639,70 @@ tbody tr:hover {
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
 }
+
+/* ── factor research ────────────────────────────────────────────────────── */
+
+/* The verdict sits above the charts on purpose: a signal whose edge is smaller
+ * than its transaction costs is the commonest false positive in factor
+ * research, and burying that under a tidy bar chart helps you fool yourself. */
+.verdict-banner {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid;
+  border-radius: 4px;
+  margin-bottom: var(--space-4);
+  font-size: 12.5px;
+}
+
+.verdict-ok  { border-color: var(--profit); background: rgba(38, 166, 154, 0.08); }
+.verdict-bad { border-color: var(--loss);   background: rgba(239, 83, 80, 0.08); }
+
+.verdict-word {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-size: 13px;
+}
+
+.verdict-ok .verdict-word  { color: var(--profit); }
+.verdict-bad .verdict-word { color: var(--loss); }
+
+.factor-pick { min-width: 200px; }
+
+.buckets {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+}
+
+.bucket {
+  display: grid;
+  grid-template-columns: 32px 1fr 72px;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.bucket-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.bucket-track {
+  height: 14px;
+  background: var(--bg-inset);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bucket-fill { height: 100%; }
+.bucket-fill.up   { background: var(--profit); opacity: 0.55; }
+.bucket-fill.down { background: var(--loss);   opacity: 0.55; }
+
+.bucket-value {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

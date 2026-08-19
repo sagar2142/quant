@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from apps.api.analytics import build_analytics_router
 from apps.api.book import build_book_router
+from apps.api.research import build_research_router
 from core.clock import utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
@@ -92,6 +93,8 @@ def create_app(
     # Risk limits and the paper book. Read-only; the console's ops screens had
     # no source at all before this and rendered blank.
     app.include_router(build_book_router())
+    # The fast research loop: score a signal without backtesting it.
+    app.include_router(build_research_router())
 
     @app.get("/health")
     def health() -> dict[str, object]:
