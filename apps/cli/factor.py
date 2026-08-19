@@ -33,8 +33,9 @@ from apps.cli.backtest import load_panel
 from core.config import settings
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
+from quant.research.composite import CompositeSpec, combine_factors, factor_correlations
 from quant.research.factors import FORWARD_HORIZONS, Factor, FactorSpec, build_factor
-from quant.research.ic import FactorReport, analyse_factor
+from quant.research.ic import FactorReport, analyse_factor, rolling_ic
 
 RULE = "─" * 78
 
@@ -67,6 +68,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--sessions", type=int, default=0, help="Trailing window. 0 uses all.")
     parser.add_argument("--buckets", type=int, default=5)
+    parser.add_argument(
+        "--combine",
+        default=None,
+        help=(
+            "Comma-separated factors to combine into one composite signal. "
+            "Order matters: orthogonalisation is sequential, so the first "
+            "factor keeps the variance it shares with later ones."
+        ),
+    )
+    parser.add_argument(
+        "--overlap",
+        action="store_true",
+        help="Report how independent the factor library actually is",
+    )
+    parser.add_argument(
+        "--rolling",
+        action="store_true",
+        help="Rolling one-year IC — has the factor stopped working?",
+    )
+    parser.add_argument("--no-orthogonalise", action="store_true")
+    parser.add_argument("--equal-weight", action="store_true")
     parser.add_argument("--lake", default=None)
     return parser.parse_args(argv)
 
@@ -101,10 +123,47 @@ def study(history: pl.DataFrame, factor: Factor, args: argparse.Namespace) -> Fa
     return analyse_factor(scored, factor.value, horizons, args.horizon, args.buckets)
 
 
+def run_composite(history: pl.DataFrame, args: argparse.Namespace) -> int:
+    """Score a combination of factors as one signal."""
+    factors = tuple(Factor(f.strip()) for f in args.combine.split(",") if f.strip())
+    spec = CompositeSpec(
+        factors=factors,
+        min_adv=args.min_adv,
+        window=args.sessions,
+        orthogonalise=not args.no_orthogonalise,
+        ic_weight=not args.equal_weight,
+        horizon=args.horizon,
+    )
+    horizons = tuple(sorted({*FORWARD_HORIZONS, args.horizon}))
+
+    started = time.perf_counter()
+    scored, weights = combine_factors(history, spec, horizons)
+    if scored.is_empty():
+        print("no names survived the liquidity filter and lookback")
+        return 1
+
+    report = analyse_factor(scored, "composite", horizons, args.horizon, args.buckets)
+    print()
+    print(RULE)
+    print("COMPOSITE  " + " + ".join(f.value for f in factors))
+    print("  weights   " + "   ".join(f"{k} {v:.1%}" for k, v in weights.items()))
+    print(f"  orthogonalised {not args.no_orthogonalise}   ic-weighted {not args.equal_weight}")
+    print()
+    print(report.format())
+    print(cost_verdict(report))
+    print(f"  [{time.perf_counter() - started:.2f}s]")
+
+    print()
+    print("  Weights are fitted on the same sample they are scored against.")
+    print("  That is in-sample by construction — this is a candidate, and the")
+    print("  gauntlet's walk-forward and PBO checks exist to test it (§5.4).")
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.factor and not args.all:
-        print("give a factor name, or --all")
+    if not (args.factor or args.all or args.combine or args.overlap):
+        print("give a factor name, or --all, --combine a,b,c, or --overlap")
         return 1
 
     store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
@@ -113,6 +172,27 @@ def run(argv: list[str] | None = None) -> int:
     except NoDataError as exc:
         print(f"{exc}\nRun: python -m apps.cli.ingest_nse --start 2019-01-01")
         return 1
+
+    if args.overlap:
+        chosen = (
+            tuple(Factor(f) for f in args.combine.split(",")) if args.combine else tuple(Factor)
+        )
+        print()
+        print(RULE)
+        print("FACTOR OVERLAP")
+        print(
+            factor_correlations(
+                history, chosen, min_adv=args.min_adv, window=args.sessions or 750
+            ).format()
+        )
+        print()
+        print("  A library of nine worth six independent bets is not a library of nine.")
+        print("  Combining duplicates counts the same effect twice and calls it")
+        print("  diversification.")
+        return 0
+
+    if args.combine:
+        return run_composite(history, args)
 
     wanted = list(Factor) if args.all else [Factor(args.factor)]
     for factor in wanted:
@@ -124,6 +204,23 @@ def run(argv: list[str] | None = None) -> int:
         print(RULE)
         print(report.format())
         print(cost_verdict(report))
+        if args.rolling:
+            windows = rolling_ic(
+                build_factor(
+                    history,
+                    FactorSpec(factor, min_adv=args.min_adv, window=args.sessions),
+                    (args.horizon,),
+                ),
+                args.horizon,
+            )
+            if windows:
+                step = max(1, len(windows) // 8)
+                print("  ROLLING 1y IC")
+                for w in windows[::step]:
+                    bar = "#" * max(0, int(abs(w.ic) * 300))
+                    print(f"    {w.end}  {w.ic:>+7.4f}  {bar[:30]}")
+            else:
+                print("  ROLLING 1y IC: not enough sessions")
         print(f"  {factor.description}")
         print(f"  [{elapsed:.2f}s]")
 

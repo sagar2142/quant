@@ -48,6 +48,10 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 .\.venv\Scripts\python.exe -m apps.cli.factor momentum_12_1
 .\.venv\Scripts\python.exe -m apps.cli.factor --all
 
+# Combine signals into one composite, and check they are not duplicates
+.\.venv\Scripts\python.exe -m apps.cli.factor --overlap
+.\.venv\Scripts\python.exe -m apps.cli.factor --combine momentum_12_1,volatility_60
+
 # Screen the whole universe — which names, not what is this name
 .\.venv\Scripts\python.exe -m apps.cli.screen --sort momentum --limit 20
 .\.venv\Scripts\python.exe -m apps.cli.screen --stationary-only

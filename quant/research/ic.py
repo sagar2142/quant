@@ -31,15 +31,18 @@ from itertools import pairwise
 
 import numpy as np
 import polars as pl
+from numpy.lib.stride_tricks import sliding_window_view
 
 __all__ = [
     "MIN_NAMES_PER_SESSION",
     "FactorReport",
     "ICSummary",
+    "ICWindow",
     "QuantileRow",
     "analyse_factor",
     "information_coefficient",
     "quantile_returns",
+    "rolling_ic",
     "signal_turnover",
 ]
 
@@ -65,6 +68,10 @@ MIN_IC_SESSIONS = 2
 #: A complete reshuffle of the ranking averages a half-unit move per name, so
 #: doubling makes 1.0 mean "fully reordered every session".
 TURNOVER_SCALE = 2
+
+#: Sessions per rolling IC window. About a year: long enough for the mean to
+#: settle, short enough to show a factor dying while it is happening.
+ROLLING_WINDOW = 252
 
 
 @dataclass(frozen=True)
@@ -165,6 +172,50 @@ class FactorReport:
             f"   turnover {self.turnover:.1%}/session"
         )
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ICWindow:
+    """Mean IC over one trailing window."""
+
+    end: str
+    ic: float
+    sessions: int
+
+
+def rolling_ic(scored: pl.DataFrame, horizon: int, window: int = ROLLING_WINDOW) -> list[ICWindow]:
+    """Mean IC over trailing windows — does the factor still work?
+
+    **A full-sample IC cannot answer that.** Momentum with an IC of +0.035 over
+    seven years could have been +0.08 for five and zero for two, which is a
+    factor that has been arbitraged away, and the average reports it as
+    healthy. Factor decay is the normal life cycle of a published effect, not
+    an exception.
+
+    Trailing windows only: each value labels the session it ends on.
+    """
+    column = f"fwd_{horizon}"
+    per_session = (
+        scored.drop_nulls(["signal", column])
+        .group_by("event_time")
+        .agg(
+            pl.corr(pl.col("signal").rank(), pl.col(column).rank()).alias("ic"),
+            pl.len().alias("names"),
+        )
+        .filter((pl.col("names") >= MIN_NAMES_PER_SESSION) & pl.col("ic").is_finite())
+        .sort("event_time")
+    )
+    if per_session.height < window:
+        return []
+
+    values = per_session["ic"].to_numpy()
+    stamps = per_session["event_time"].to_list()
+    frames = sliding_window_view(values, window)
+    means = frames.mean(axis=1)
+    return [
+        ICWindow(end=stamps[i + window - 1].date().isoformat(), ic=float(m), sessions=window)
+        for i, m in enumerate(means)
+    ]
 
 
 def information_coefficient(scored: pl.DataFrame, horizon: int) -> ICSummary:
