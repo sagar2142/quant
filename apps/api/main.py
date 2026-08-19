@@ -25,6 +25,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from apps.api.analytics import build_analytics_router
+from apps.api.book import build_book_router
 from core.clock import utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
@@ -88,6 +89,9 @@ def create_app(
     # `apps.cli.terminal`, so the console and the terminal cannot disagree
     # about what a security is.
     app.include_router(build_analytics_router())
+    # Risk limits and the paper book. Read-only; the console's ops screens had
+    # no source at all before this and rendered blank.
+    app.include_router(build_book_router())
 
     @app.get("/health")
     def health() -> dict[str, object]:

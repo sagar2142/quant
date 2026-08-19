@@ -42,12 +42,37 @@ function Console() {
     async function poll() {
       const started = performance.now();
       try {
-        const response = await fetch("/api/vitals");
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const vitals = await response.json();
+        // Vitals, the book and the limits together: three cheap reads, and a
+        // console showing a stale position next to a fresh P&L is worse than
+        // one that refreshes them as a set.
+        const [vitalsRes, bookRes, limitsRes] = await Promise.all([
+          fetch("/api/vitals"),
+          fetch("/api/book"),
+          fetch("/api/risk/limits"),
+        ]);
+        if (!vitalsRes.ok) throw new Error(`HTTP ${vitalsRes.status}`);
+        const vitals = await vitalsRes.json();
+        const book = bookRes.ok ? await bookRes.json() : null;
+        const limits = limitsRes.ok ? await limitsRes.json() : [];
         if (cancelled) return;
         setState((previous) => ({
           ...previous,
+          positions: (book?.positions ?? []).map((p: Record<string, number | string>) => ({
+            instrumentId: String(p.instrument_id),
+            symbol: String(p.symbol),
+            quantity: Number(p.quantity),
+            averagePrice: Number(p.average_price),
+            lastPrice: Number(p.last_price),
+            unrealisedPnl: Number(p.unrealised_pnl),
+            weightPct: Number(p.weight_pct),
+            cluster: "",
+          })),
+          risk: (limits as Record<string, number | string>[]).map((l) => ({
+            name: String(l.name),
+            observed: 0,
+            threshold: Number(l.threshold),
+            passed: true,
+          })),
           latencyMs: performance.now() - started,
           vitals: {
             feeds: vitals.feeds,
