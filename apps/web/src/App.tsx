@@ -11,7 +11,7 @@
  * agree with me.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Analytics } from "./components/Analytics";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
@@ -29,14 +29,20 @@ import "./shell.css";
 
 type Screen = "overview" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
 
-const SCREENS: { id: Screen; label: string; icon: string; key: string }[] = [
-  { id: "overview", label: "Overview", icon: "◧", key: "o" },
-  { id: "screener", label: "Screener", icon: "⌗", key: "s" },
-  { id: "analytics", label: "Analytics", icon: "∿", key: "a" },
-  { id: "positions", label: "Positions", icon: "▤", key: "p" },
-  { id: "blotter", label: "Blotter", icon: "▦", key: "b" },
-  { id: "risk", label: "Risk", icon: "▲", key: "r" },
-  { id: "reconcile", label: "Reconcile", icon: "⇄", key: "c" },
+const SCREENS: {
+  id: Screen;
+  label: string;
+  icon: string;
+  key: string;
+  group: "Analysis" | "Operations";
+}[] = [
+  { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
+  { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
+  { group: "Operations", id: "overview", label: "Overview", icon: "◧", key: "o" },
+  { group: "Operations", id: "positions", label: "Positions", icon: "▤", key: "p" },
+  { group: "Operations", id: "blotter", label: "Blotter", icon: "▦", key: "b" },
+  { group: "Operations", id: "risk", label: "Risk", icon: "▲", key: "r" },
+  { group: "Operations", id: "reconcile", label: "Reconcile", icon: "⇄", key: "c" },
 ];
 
 export interface Position {
@@ -261,7 +267,7 @@ export function App({
   state: ConsoleState;
   onKill: (reason: string) => void;
 }) {
-  const [screen, setScreen] = useState<Screen>("overview");
+  const [screen, setScreen] = useState<Screen>("analytics");
   // Set when a screener row is clicked, so the analytics screen opens on that
   // name. Keyed on the component so it remounts and refetches.
   const [picked, setPicked] = useState<string | null>(null);
@@ -286,16 +292,22 @@ export function App({
 
       <div className="shell-body">
         <nav className="nav" aria-label="Screens">
-          {SCREENS.map((item) => (
+          {SCREENS.map((item, index) => (
+            <Fragment key={item.id}>
+              {index === 0 || SCREENS[index - 1]?.group !== item.group ? (
+                <div className="nav-group">{item.group}</div>
+              ) : null}
             <button
-              key={item.id}
               type="button"
               title={`${item.label} (${item.key})`}
               aria-current={screen === item.id ? "page" : undefined}
               onClick={() => setScreen(item.id)}
             >
-              {item.icon}
+              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-label">{item.label}</span>
+              <span className="nav-key">{item.key}</span>
             </button>
+            </Fragment>
           ))}
         </nav>
 

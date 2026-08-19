@@ -57,7 +57,9 @@
 
   --shell-vitals: 40px;
   --shell-status: 24px;
-  --shell-nav: 48px;
+  /* Wide enough for a label. An icon-only rail makes every screen a guess,
+   * and a system whose analytics cannot be found does not have analytics. */
+  --shell-nav: 168px;
   --panel-header: 28px;
 
   /* Nothing rounder. Quant software is precise, not friendly. */
