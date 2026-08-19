@@ -33,8 +33,8 @@ import polars as pl
 from apps.cli.backtest import build_universe, load_panel
 from core.config import settings
 from core.instruments import InstrumentId
-from data.corpactions.actions import CorporateActionBook, back_adjust
-from data.feeds.yahoo import YahooActionsLoader
+from data.corpactions.actions import CorporateAction, back_adjust
+from data.feeds.yahoo import YahooActionsLoader, YahooError
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from quant.analytics.crosssection import CrossSection, analyse_cross_section
@@ -63,7 +63,9 @@ def money(value: float | None, width: int = 12) -> str:
 
 
 def series_for(
-    history: pl.DataFrame, symbol: str, book: CorporateActionBook | None = None
+    history: pl.DataFrame,
+    symbol: str,
+    actions: dict[str, list[CorporateAction]] | None = None,
 ) -> pl.DataFrame:
     """One name's series, back-adjusted for corporate actions.
 
@@ -83,25 +85,63 @@ def series_for(
         .sort("event_time")
         .select("event_time", "open", "high", "low", "close", "volume")
     )
-    if book is None or rows.is_empty():
+    if not actions or rows.is_empty():
         return rows
-
-    instrument_id = InstrumentId(history.filter(pl.col("symbol") == symbol)["instrument_id"][0])
-    actions = book.for_instrument(instrument_id)
-    return back_adjust(rows, actions) if actions else rows
+    for_symbol = actions.get(symbol, [])
+    return back_adjust(rows, for_symbol) if for_symbol else rows
 
 
-def load_actions(history: pl.DataFrame, symbols: list[str]) -> CorporateActionBook:
-    """Corporate actions for the named securities, from the free Yahoo source."""
+def load_actions(history: pl.DataFrame, symbols: list[str]) -> dict[str, list[CorporateAction]]:
+    """Corporate actions per symbol, from the free Yahoo source.
+
+    **Keyed by symbol, never by a single instrument id.** A symbol can carry
+    more than one ISIN over its life — HDFCBANK is INE040A01026 until the 2019
+    split changes its face value and INE040A01034 after, and 344 symbols in
+    this panel have the same shape. Collapsing symbol to *one* id picked an
+    arbitrary ISIN, and because the choice was not stable the same command
+    returned a -9% three-year return on one run and -54% on the next.
+
+    Yahoo is queried by ticker, so one request covers every ISIN the symbol has
+    worn. The panel's price series is likewise continuous by symbol, which is
+    what a chart of "HDFCBANK" means. §1.1 keeps ISIN as the stable identity
+    for *positions and orders*; this is the display axis, and conflating the
+    two is what produced the bug.
+    """
+    loader = YahooActionsLoader()
     lookup = dict(history.select("symbol", "instrument_id").unique().iter_rows())
-    wanted = {InstrumentId(lookup[s]): s for s in symbols if s in lookup}
-    if not wanted:
-        return CorporateActionBook([])
-    result = YahooActionsLoader().fetch_book(wanted)
-    if result.failures:
-        print(f"  corporate actions unavailable for: {', '.join(result.failures)}")
+    out: dict[str, list[CorporateAction]] = {}
+    failed: list[str] = []
+    for symbol in symbols:
+        if symbol not in lookup:
+            continue
+        try:
+            out[symbol] = loader.fetch(symbol, InstrumentId(lookup[symbol]))
+        except YahooError:
+            failed.append(symbol)
+    if failed:
+        print(f"  corporate actions unavailable for: {', '.join(sorted(failed))}")
         print("  those names are shown UNADJUSTED — splits will read as crashes")
-    return result.book
+    return out
+
+
+def report_identity_changes(history: pl.DataFrame, symbols: list[str]) -> None:
+    """Say when a symbol has worn more than one ISIN in the sample.
+
+    Material rather than trivia: it marks a face-value change, a merger or a
+    re-listing, and the price series either side of it may not describe the
+    same economic thing.
+    """
+    counts = (
+        history.filter(pl.col("symbol").is_in(symbols))
+        .select("symbol", "instrument_id")
+        .unique()
+        .group_by("symbol")
+        .agg(pl.len().alias("ids"))
+        .filter(pl.col("ids") > 1)
+    )
+    for row in counts.sort("symbol").to_dicts():
+        print(f"  note: {row['symbol']} carries {row['ids']} ISINs in this sample")
+        print("        (face-value change, merger or re-listing)")
 
 
 def print_security(profile: SecurityProfile) -> None:
@@ -232,7 +272,9 @@ def resolve_symbols(
 
 
 def aligned_returns(
-    history: pl.DataFrame, symbols: list[str], book: CorporateActionBook | None = None
+    history: pl.DataFrame,
+    symbols: list[str],
+    actions: dict[str, list[CorporateAction]] | None = None,
 ) -> tuple[list[str], npt.NDArray[np.float64]]:
     """Return matrix over sessions where *every* name traded.
 
@@ -242,7 +284,7 @@ def aligned_returns(
     frames = []
     kept = []
     for symbol in symbols:
-        rows = series_for(history, symbol, book)
+        rows = series_for(history, symbol, actions)
         if rows.height:
             frames.append(rows.select("event_time", pl.col("close").alias(symbol)))
             kept.append(symbol)
@@ -273,7 +315,8 @@ def run(argv: list[str] | None = None) -> int:
         print("give one or more symbols, or --top N")
         return 1
 
-    book = CorporateActionBook([]) if args.raw_prices else load_actions(history, symbols)
+    actions = {} if args.raw_prices else load_actions(history, symbols)
+    report_identity_changes(history, symbols)
 
     if args.sessions:
         recent = history["event_time"].unique().sort().tail(args.sessions)
@@ -281,7 +324,7 @@ def run(argv: list[str] | None = None) -> int:
 
     profiled = 0
     for symbol in symbols:
-        rows = series_for(history, symbol, book)
+        rows = series_for(history, symbol, actions)
         if rows.is_empty():
             print(f"\n{symbol}: not in the panel")
             continue
@@ -294,7 +337,7 @@ def run(argv: list[str] | None = None) -> int:
             print(f"\n{exc}")
 
     if len(symbols) > 1:
-        kept, matrix = aligned_returns(history, symbols, book)
+        kept, matrix = aligned_returns(history, symbols, actions)
         if matrix.size:
             try:
                 print()

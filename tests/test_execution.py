@@ -7,11 +7,9 @@ holds a position it does not know about.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
 import pytest
 
 from core.clock import UTC, utc_now
@@ -19,7 +17,7 @@ from core.instruments import AssetClass, Currency, Exchange, Instrument, Instrum
 from core.orders import OrderState, OrderType, Side
 from engine.accounting import Fill, Portfolio
 from engine.costs.model import CostBreakdown
-from ops.alerts import Alert, AlertRouter, ConsoleSink, Severity, TelegramSink
+from ops.alerts import Alert, AlertRouter, ConsoleSink, Severity
 from trading.execution.broker import BrokerError, BrokerPosition, PaperBroker
 from trading.execution.orders import IllegalTransitionError, Order, OrderTransition, TradingMode
 from trading.reconcile.positions import BreakKind, reconcile_positions
@@ -455,64 +453,69 @@ class TestReconciliation:
 
 
 class TestAlerting:
-    def stub(self, status: int = 200):
-        sent: list[dict] = []
+    """Alert construction and routing, against a recording sink.
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            sent.append(json.loads(request.content))
-            return httpx.Response(status, json={"ok": status == 200})
+    Push channels were removed; the console is the only sink. These test the
+    *content* of an alert — severity escalation, the runbook pointer — which is
+    what a runbook-following operator actually reads.
+    """
 
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        return TelegramSink("token", "chat", client=client), sent
+    def stub(self) -> tuple[object, list[Alert]]:
+        captured: list[Alert] = []
 
-    def test_sends_formatted_message(self):
-        sink, sent = self.stub()
-        assert sink.send(Alert(Severity.CRITICAL, "kill switch engaged"))
-        assert "kill switch engaged" in sent[0]["text"]
-        assert "CRITICAL" in sent[0]["text"]
+        class Recording:
+            def send(self, alert: Alert) -> bool:
+                captured.append(alert)
+                return True
 
-    def test_http_failure_is_swallowed(self):
-        """An unreachable alerting API must never halt a working strategy."""
-        sink, _ = self.stub(status=500)
-        assert sink.send(Alert(Severity.INFO, "test")) is False
-
-    def test_network_error_is_swallowed(self):
-        def handler(_request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("no route to host")
-
-        sink = TelegramSink("t", "c", client=httpx.Client(transport=httpx.MockTransport(handler)))
-        assert sink.send(Alert(Severity.CRITICAL, "test")) is False
-
-    def test_unconfigured_sink_reports_failure(self):
-        assert TelegramSink("", "").send(Alert(Severity.INFO, "test")) is False
+        return Recording(), captured
 
     def test_router_tries_every_sink(self):
-        failing, _ = self.stub(status=500)
-        router = AlertRouter([failing, ConsoleSink()])
-        # The console sink still succeeds even though Telegram failed.
-        assert router.send(Alert(Severity.CRITICAL, "test"))
+        """A sink that fails must not stop the ones after it — the point of a
+        second channel is that it works when the first does not."""
+
+        class Failing:
+            def send(self, alert: Alert) -> bool:
+                return False
+
+        sink, captured = self.stub()
+        assert AlertRouter([Failing(), sink]).send(Alert(Severity.CRITICAL, "test"))
+        assert len(captured) == 1
 
     def test_router_without_sinks_reports_failure(self):
         assert AlertRouter([]).send(Alert(Severity.INFO, "test")) is False
 
+    def test_console_sink_accepts(self):
+        assert ConsoleSink().send(Alert(Severity.INFO, "test"))
+
     def test_severity_escalates_with_staleness(self):
-        sink, sent = self.stub()
+        """A feed 30x past its threshold is not the same event as one 1.5x
+        past it, and the severity has to say so."""
+        sink, captured = self.stub()
         router = AlertRouter([sink])
         router.data_stale("nse", seconds=3, threshold=2)
         router.data_stale("nse", seconds=60, threshold=2)
-        assert "WARN" in sent[0]["text"]
-        assert "CRITICAL" in sent[1]["text"]
+        assert captured[0].severity is Severity.WARN
+        assert captured[1].severity is Severity.CRITICAL
 
     def test_alerts_carry_a_runbook(self):
-        sink, sent = self.stub()
+        """An alert without a runbook is a problem statement at 3am."""
+        sink, captured = self.stub()
         AlertRouter([sink]).reconciliation_break(2, "detail")
-        assert "runbook:" in sent[0]["text"]
+        assert captured[0].runbook
+        assert "runbook:" in captured[0].format()
 
     def test_critical_wakes_the_operator(self):
         assert Severity.CRITICAL.wakes_the_operator
         assert not Severity.WARN.wakes_the_operator
 
     def test_daily_summary_includes_drift(self):
-        sink, sent = self.stub()
+        sink, captured = self.stub()
         AlertRouter([sink]).daily_summary(Decimal(1234), 5, drift=-0.012)
-        assert "drift" in sent[0]["text"]
+        assert "drift" in captured[0].body.lower()
+
+    def test_kill_switch_alert_names_the_operator(self):
+        sink, captured = self.stub()
+        AlertRouter([sink]).kill_switch(engaged=True, by="sagar", reason="test halt")
+        assert "sagar" in captured[0].body
+        assert captured[0].severity is Severity.CRITICAL
