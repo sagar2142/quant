@@ -60,3 +60,8 @@ desktop.ini
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Local run logs
+api.log
+web.log
+*_demo.log
