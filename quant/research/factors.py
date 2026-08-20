@@ -44,6 +44,11 @@ FORWARD_HORIZONS: tuple[int, ...] = (1, 5, 21, 63)
 #: year plus a month, so the 12-1 window has a full lookback.
 MIN_BARS = 273
 
+#: Indian ISINs encode the issuer type in their third character: INE is a
+#: company, INF a mutual fund or ETF, IN9 a depositary receipt. The panel holds
+#: whatever traded on NSE, which includes cash and liquid ETFs.
+EQUITY_ISIN_MARKER = ":INE"
+
 
 class Factor(str, Enum):
     """The signals this library can compute from OHLCV.
@@ -111,6 +116,16 @@ class FactorSpec:
     min_adv: float = 1e7
     #: Sessions of history used. 0 uses everything available.
     window: int = 0
+    #: Restrict to listed companies, excluding ETFs and mutual funds.
+    #:
+    #: **On by default, and it is not cosmetic.** NSE lists cash and liquid
+    #: ETFs — LIQUID1, CASHIETF, LIQUIDPLUS — whose volatility is near zero by
+    #: construction rather than by anomaly. Left in, they dominate any
+    #: low-volatility factor: 48 of the top 60 names of a momentum plus
+    #: low-volatility composite were money-market funds, whose "edge" is that
+    #: they are not equities. A backtest on them would show a wonderful Sharpe
+    #: and describe a savings account.
+    equities_only: bool = True
 
     def __post_init__(self) -> None:
         if self.min_adv < 0:
@@ -128,6 +143,9 @@ def prepare_panel(history: pl.DataFrame, spec: FactorSpec) -> pl.DataFrame:
     if spec.window > 0:
         recent = frame["event_time"].unique().sort().tail(spec.window)
         frame = frame.filter(pl.col("event_time").is_in(recent.implode()))
+
+    if spec.equities_only:
+        frame = frame.filter(pl.col("instrument_id").str.contains(EQUITY_ISIN_MARKER, literal=True))
 
     if spec.min_adv > 0:
         liquid = (

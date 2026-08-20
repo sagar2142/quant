@@ -49,7 +49,9 @@ def panel(series: dict[str, list[float]], volume: float = 1e6) -> pl.DataFrame:
                 {
                     "event_time": times,
                     "symbol": [symbol] * length,
-                    "instrument_id": [f"NSE:{symbol}"] * length,
+                    # Real NSE equity ISINs begin INE; the factor pipeline filters on
+                    # that to keep cash ETFs out of the universe.
+                    "instrument_id": [f"NSE:INE{symbol}"] * length,
                     "close": closes,
                     "volume": [volume] * length,
                 },
@@ -306,3 +308,31 @@ class TestRollingStatistics:
     def test_series_formats(self):
         returns = np.random.default_rng(SEED).normal(0, 0.01, 300)
         assert "sharpe" in rolling_sharpe(returns).format()
+
+
+class TestEquitiesOnly:
+    """NSE lists cash and liquid ETFs, and they are not equities.
+
+    Their volatility is near zero by construction rather than by anomaly, so
+    left in they dominate any low-volatility factor: 48 of the top 60 names of
+    a momentum plus low-volatility composite were money-market funds. A
+    backtest on those shows a wonderful Sharpe and describes a savings account.
+    """
+
+    def mixed(self) -> pl.DataFrame:
+        equity = panel({"STOCK": walk(seed=1)})
+        fund = panel({"LIQUIDETF": walk(seed=2)}).with_columns(
+            pl.lit("NSE:INF0001").alias("instrument_id")
+        )
+        return pl.concat([equity, fund])
+
+    def test_funds_are_excluded_by_default(self):
+        kept = prepare_panel(self.mixed(), FactorSpec(Factor.MOMENTUM_12_1))
+        assert kept["symbol"].unique().to_list() == ["STOCK"]
+
+    def test_they_can_be_kept_deliberately(self):
+        kept = prepare_panel(self.mixed(), FactorSpec(Factor.MOMENTUM_12_1, equities_only=False))
+        assert set(kept["symbol"].unique().to_list()) == {"STOCK", "LIQUIDETF"}
+
+    def test_the_default_is_on(self):
+        assert FactorSpec(Factor.MOMENTUM_12_1).equities_only

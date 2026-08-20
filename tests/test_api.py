@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
+from core.config import Settings
 from ops.alerts import Alert, AlertRouter
 from trading.risk.engine import RiskEngine
 
@@ -25,12 +26,42 @@ class RecordingSink:
         return True
 
 
+#: The kill switch is unavailable until a token is configured — that is the
+#: point of the guard, so these tests configure one rather than working around
+#: it. Reads stay open either way, which is why the read tests need no header.
+HARNESS_TOKEN = "harness-token"
+
+
 @pytest.fixture
 def harness():
+    """A client whose kill switch is reachable.
+
+    Authenticating here rather than disabling the guard: a harness that
+    bypassed authentication would stop testing the endpoint that ships.
+
+    Settings are restored *before* the auth module is reloaded, not by
+    monkeypatch afterwards. Fixture teardown runs ahead of monkeypatch teardown,
+    so reloading first would rebind the module to the still-patched token and
+    leak it into every later test.
+    """
+    import importlib
+
+    import core.config as config_module
+
+    original = config_module.settings
+    config_module.settings = Settings(api_token=HARNESS_TOKEN)
+    import apps.api.auth as auth_module
+
+    importlib.reload(auth_module)
+
     engine = RiskEngine()
     sink = RecordingSink()
     client = TestClient(create_app(engine, AlertRouter([sink])))
-    return client, engine, sink
+    client.headers.update({"Authorization": f"Bearer {HARNESS_TOKEN}"})
+    yield client, engine, sink
+
+    config_module.settings = original
+    importlib.reload(auth_module)
 
 
 class TestHealth:

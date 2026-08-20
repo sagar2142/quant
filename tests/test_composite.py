@@ -45,7 +45,9 @@ def panel(series: dict[str, list[float]], volume: float = 1e6) -> pl.DataFrame:
                 {
                     "event_time": times,
                     "symbol": [symbol] * length,
-                    "instrument_id": [f"NSE:{symbol}"] * length,
+                    # Real NSE equity ISINs begin INE; the factor pipeline filters on
+                    # that to keep cash ETFs out of the universe.
+                    "instrument_id": [f"NSE:INE{symbol}"] * length,
                     "close": closes,
                     "volume": [volume] * length,
                 },
