@@ -280,10 +280,17 @@ def aligned_returns(
 
     Inner join rather than per-name cleaning: a correlation computed across
     misaligned dates is noise that looks like structure.
+
+    **Repeated symbols are collapsed, first occurrence winning.** Each name
+    becomes a column keyed by its own symbol, so a repeat previously produced a
+    second column that polars auto-suffixed — a cross-section holding the same
+    instrument twice, correlating 1.0 with itself and understating the
+    effective-bet count. That returned a plausible 200 rather than an error.
+    Above two repeats the join collided outright and raised.
     """
     frames = []
-    kept = []
-    for symbol in symbols:
+    kept: list[str] = []
+    for symbol in dict.fromkeys(symbols):
         rows = series_for(history, symbol, actions)
         if rows.height:
             frames.append(rows.select("event_time", pl.col("close").alias(symbol)))

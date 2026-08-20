@@ -110,3 +110,48 @@ class TestReadOnlySurface:
         assert "/orders" not in paths
         mutating = {p for p in paths if p.startswith("/kill")}
         assert mutating == {"/kill", "/kill/release"}
+
+
+class TestHostValidation:
+    """§13.7, §21 — binding to 127.0.0.1 is necessary and not sufficient.
+
+    A browser is already inside the loopback boundary. A page the operator
+    visits can re-resolve its own hostname to 127.0.0.1 after loading, at which
+    point its requests are same-origin and CORS does not apply. The Host header
+    is what still distinguishes them, because the attacking page must send its
+    own name.
+    """
+
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from apps.api.main import create_app
+
+        return TestClient(create_app())
+
+    def test_the_local_console_is_served(self):
+        assert self.client().get("/health").status_code == 200
+
+    def test_a_foreign_host_header_is_refused(self):
+        response = self.client().get("/health", headers={"host": "evil.example.com"})
+        assert response.status_code == 400
+
+    def test_the_kill_switch_cannot_be_released_cross_origin(self):
+        """The direction that matters. Engaging a halt is fail-safe; releasing
+        one is the last thing standing between a known-bad book and the
+        market."""
+        body = {"reason": "released by an attacker", "operator": "evil"}
+        response = self.client().post(
+            "/kill/release", json=body, headers={"host": "evil.example.com"}
+        )
+        assert response.status_code == 400
+
+    def test_localhost_is_also_accepted(self):
+        assert self.client().get("/health", headers={"host": "localhost"}).status_code == 200
+
+    def test_the_allowed_hosts_carry_no_port(self):
+        """Starlette strips the port before comparing, so pinning one would
+        break every other port without adding protection."""
+        from apps.api.main import ALLOWED_HOSTS
+
+        assert all(":" not in host for host in ALLOWED_HOSTS)

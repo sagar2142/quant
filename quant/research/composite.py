@@ -213,7 +213,10 @@ def factor_correlations(
     """
     joined: pl.DataFrame | None = None
     names: list[str] = []
-    for factor in factors:
+    # Deduplicated for the same reason as `aligned_returns`: each factor
+    # becomes a column keyed by its own name, and a repeat would either
+    # silently correlate a factor with itself or collide on the join.
+    for factor in dict.fromkeys(factors):
         scored = build_factor(
             history, FactorSpec(factor, min_adv=min_adv, window=window), (21,)
         ).select("event_time", "symbol", pl.col("signal").alias(factor.value))

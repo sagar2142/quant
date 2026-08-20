@@ -277,3 +277,68 @@ class TestStructureMetrics:
         covariance = np.eye(3) * 0.04
         weights = np.full(3, 1 / 3)
         assert diversification_ratio(weights, covariance) > 1.0
+
+
+class TestDuplicateSymbols:
+    """A cross-section of a name against itself is not a cross-section.
+
+    Each name becomes a column keyed by its own symbol, so a repeat used to
+    produce a second auto-suffixed column: the same instrument twice,
+    correlating 1.0 with itself and understating the effective-bet count. That
+    returned a plausible 200 rather than an error, which is the worse failure.
+    Above two repeats the join collided outright.
+    """
+
+    def panel(self, symbols, sessions: int = 300):
+        from datetime import datetime, timedelta
+
+        import polars as pl
+
+        from core.clock import UTC
+
+        rng = np.random.default_rng(7)
+        times = [datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=i) for i in range(sessions)]
+        return pl.concat(
+            [
+                pl.DataFrame(
+                    {
+                        "event_time": times,
+                        "symbol": [s] * sessions,
+                        "instrument_id": [f"NSE:{s}"] * sessions,
+                        "open": (
+                            c := list(100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, sessions))))
+                        ),
+                        "high": c,
+                        "low": c,
+                        "close": c,
+                        "volume": [1e6] * sessions,
+                    },
+                    schema_overrides={"event_time": pl.Datetime("us", "UTC")},
+                )
+                for s in symbols
+            ]
+        )
+
+    def test_a_repeated_symbol_is_collapsed(self):
+        from apps.cli.terminal import aligned_returns
+
+        frame = self.panel(["AAA", "BBB"])
+        kept, matrix = aligned_returns(frame, ["AAA", "AAA", "BBB"])
+        assert kept == ["AAA", "BBB"]
+        assert matrix.shape[1] == 2
+
+    def test_many_repeats_do_not_crash(self):
+        """Three or more collided on the join and raised DuplicateError."""
+        from apps.cli.terminal import aligned_returns
+
+        frame = self.panel(["AAA"])
+        kept, matrix = aligned_returns(frame, ["AAA"] * 40)
+        assert kept == ["AAA"]
+        assert matrix.shape[1] == 1
+
+    def test_first_occurrence_order_is_kept(self):
+        from apps.cli.terminal import aligned_returns
+
+        frame = self.panel(["AAA", "BBB"])
+        kept, _ = aligned_returns(frame, ["BBB", "AAA", "BBB"])
+        assert kept == ["BBB", "AAA"]

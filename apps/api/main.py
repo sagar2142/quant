@@ -23,6 +23,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from apps.api.analytics import build_analytics_router
 from apps.api.book import build_book_router
@@ -33,6 +34,12 @@ from ops.alerts import AlertRouter, ConsoleSink
 from trading.risk.engine import RiskEngine
 
 __all__ = ["create_app"]
+
+#: Host headers this API answers to. A request arriving under any other name
+#: is not from the local console, whatever address it reached.
+#: Starlette strips the port before comparing, so these are port-independent
+#: and do not need updating when the API moves.
+ALLOWED_HOSTS = ("127.0.0.1", "localhost", "testserver")
 
 #: Staleness thresholds mirrored from §12.7 so the UI and the alerts agree.
 STALE_WARN_SECONDS = 2.0
@@ -86,6 +93,18 @@ def create_app(
         version="0.1.0",
         docs_url="/docs",
     )
+
+    # §13.7 binds this to 127.0.0.1, which is necessary and not sufficient. A
+    # browser is already inside the loopback boundary: a page the operator
+    # visits can re-resolve its own hostname to 127.0.0.1 after loading (DNS
+    # rebinding), at which point requests to this API are same-origin and CORS
+    # does not apply. Without a Host check, that page could reach /kill/release.
+    #
+    # Engaging a halt is fail-safe; releasing one is not, and this is the
+    # switch §21 treats as the last line before real money. Rejecting unknown
+    # Host headers closes the rebinding path, because the attacking page must
+    # send its own hostname.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     # Analytics is read-only and shares its implementation with
     # `apps.cli.terminal`, so the console and the terminal cannot disagree
     # about what a security is.
