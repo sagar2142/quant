@@ -48,6 +48,10 @@ MAX_SYMBOLS = 40
 #: Rows returned by the symbol search. Enough to pick from, few enough to scan.
 SEARCH_LIMIT = 60
 
+#: Candidates named in a 404. Enough to spot the one you meant, few enough to
+#: read in a single line.
+SUGGESTIONS = 8
+
 #: A cross-section is a comparison; one name is a security screen.
 MIN_CROSS_SECTION = 2
 
@@ -65,6 +69,31 @@ def _panel() -> pl.DataFrame:
     """
     store = PanelStore(settings.lake, venue="NSE")
     return store.view(as_of=as_decision_time(utc_now()))
+
+
+def _not_found(history: pl.DataFrame, name: str) -> str:
+    """A 404 that names the near misses.
+
+    "TATA is not in the panel" is true and useless when TATASTEEL, TATAPOWER
+    and eight others are. An error that leaves the reader guessing the ticker
+    is a dead end; one that lists candidates is a next step.
+    """
+    matches = (
+        history.filter(pl.col("symbol").str.starts_with(name))["symbol"].unique().sort().to_list()
+    )
+    if not matches:
+        # Fall back to a substring search: the typo may be a prefix, not a stem.
+        matches = (
+            history.filter(pl.col("symbol").str.contains(name, literal=True))["symbol"]
+            .unique()
+            .sort()
+            .to_list()
+        )
+    if matches:
+        listed = ", ".join(matches[:SUGGESTIONS])
+        more = f" (+{len(matches) - SUGGESTIONS} more)" if len(matches) > SUGGESTIONS else ""
+        return f"{name} is not a ticker. Did you mean: {listed}{more}"
+    return f"{name} is not in the panel"
 
 
 def _windowed(history: pl.DataFrame, sessions: int) -> pl.DataFrame:
@@ -115,7 +144,7 @@ def _register_security(router: APIRouter) -> None:
         actions = load_actions(history, [name])
         rows = series_for(history, name, actions)
         if rows.is_empty():
-            raise HTTPException(status_code=404, detail=f"{name} is not in the panel")
+            raise HTTPException(status_code=404, detail=_not_found(history, name))
 
         try:
             p = profile_security(name, rows["close"].to_list(), rows["volume"].to_list())
@@ -167,7 +196,7 @@ def _register_security(router: APIRouter) -> None:
         name = symbol.upper()
         rows = series_for(history, name, load_actions(history, [name]))
         if rows.is_empty():
-            raise HTTPException(status_code=404, detail=f"{name} is not in the panel")
+            raise HTTPException(status_code=404, detail=_not_found(history, name))
         return {
             "dates": [d.date().isoformat() for d in rows["event_time"].to_list()],
             "closes": [float(c) for c in rows["close"].to_list()],

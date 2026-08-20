@@ -367,9 +367,44 @@ export function Analytics({
   const [sessions, setSessions] = useState(750);
   const [security, setSecurity] = useState<Security | null>(null);
   const [closes, setCloses] = useState<number[]>([]);
+  const [matches, setMatches] = useState<{ symbol: string; adv: number }[]>([]);
   const [section, setSection] = useState<CrossSection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Suggestions for the token under the cursor — the last word, since the
+  // field takes several symbols. Without this the field demands you already
+  // know the exact ticker, and "TATA" is not one: TATASTEEL, TATAPOWER and
+  // eight others are.
+  const typing = input.trim().split(/[\s,]+/).pop() ?? "";
+  useEffect(() => {
+    if (typing.length < 2) {
+      setMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const response = await fetch(`${apiBase}/symbols?q=${encodeURIComponent(typing)}`);
+      if (!response.ok || cancelled) return;
+      const rows = (await response.json()) as { symbol: string; adv: number }[];
+      // Hide the list once the token is already an exact ticker.
+      setMatches(rows.length === 1 && rows[0]?.symbol === typing.toUpperCase() ? [] : rows.slice(0, 12));
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [apiBase, typing]);
+
+  const pick = useCallback(
+    (symbol: string) => {
+      const parts = input.trim().split(/[\s,]+/).filter(Boolean);
+      parts[parts.length === 0 ? 0 : parts.length - 1] = symbol;
+      setInput(parts.join(" ") + " ");
+      setMatches([]);
+    },
+    [input],
+  );
 
   const load = useCallback(async () => {
     const symbols = input.trim().split(/[\s,]+/).filter(Boolean).map((s) => s.toUpperCase());
@@ -447,6 +482,22 @@ export function Analytics({
           {loading ? "…" : "Run"}
         </button>
       </form>
+
+      {matches.length > 0 ? (
+        <div className="suggestions">
+          {matches.map((m) => (
+            <button
+              key={m.symbol}
+              type="button"
+              className="suggestion"
+              onClick={() => pick(m.symbol)}
+            >
+              <span>{m.symbol}</span>
+              <span className="suggestion-adv">{(m.adv / 1e7).toFixed(0)} Cr</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {error ? <div className="analytics-note text-critical">{error}</div> : null}
 
