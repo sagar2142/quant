@@ -26,6 +26,7 @@ import polars as pl
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from apps.api.auth import ReadAccess
 from core.instruments import InstrumentId
 from trading.paper.state import PaperStateStore, StateCorruptError
 from trading.risk.limits import RiskLimits
@@ -162,7 +163,7 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
     """
     router = APIRouter(tags=["book"])
 
-    @router.get("/risk/limits")
+    @router.get("/risk/limits", dependencies=[ReadAccess])
     def risk_limits() -> list[LimitRow]:
         """What the engine actually enforces.
 
@@ -172,7 +173,7 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
         """
         return _limit_rows(RiskLimits())
 
-    @router.get("/book", response_model=BookResponse)
+    @router.get("/book", response_model=BookResponse, dependencies=[ReadAccess])
     def book() -> BookResponse:
         """The paper account, marked to the latest panel close."""
         store = PaperStateStore(DEFAULT_STATE_DIR)
@@ -232,7 +233,7 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
             absent=False,
         )
 
-    @router.get("/equity")
+    @router.get("/equity", dependencies=[ReadAccess])
     def equity_curve() -> list[dict[str, str]]:
         """One row per completed cycle. This is the M9 six-week clock (§M9)."""
         return PaperStateStore(DEFAULT_STATE_DIR).equity_history()

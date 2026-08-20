@@ -10,6 +10,12 @@ import { defineConfig } from "vite";
 // than as a connection error.
 const apiPort = process.env.NEUTRON_API_PORT ?? "8000";
 
+// The dev server injects the token so it never reaches browser JavaScript.
+// A token in frontend code is readable by any script on the page and ends up
+// in devtools, in a screenshot, and in the bundle — the proxy is the only
+// layer that can hold it and still be useful.
+const apiToken = process.env.NEUTRON_API_TOKEN ?? "";
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -19,6 +25,7 @@ export default defineConfig({
       "/api": {
         target: `http://127.0.0.1:${apiPort}`,
         rewrite: (p) => p.replace(/^\/api/, ""),
+        headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined,
       },
     },
   },

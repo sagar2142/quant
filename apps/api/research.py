@@ -15,6 +15,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from apps.api.auth import ReadAccess
 from apps.cli.factor import ROUND_TRIP_COST
 from quant.research.factors import FORWARD_HORIZONS, Factor, FactorSpec, build_factor
 from quant.research.ic import analyse_factor
@@ -63,13 +64,13 @@ class FactorListRow(BaseModel):
 def build_research_router() -> APIRouter:
     router = APIRouter(tags=["research"])
 
-    @router.get("/factors")
+    @router.get("/factors", dependencies=[ReadAccess])
     def factors() -> list[FactorListRow]:
         """The signal library. A closed set on purpose — a free-text formula
         field would let a typo become a discovery."""
         return [FactorListRow(name=f.value, description=f.description) for f in Factor]
 
-    @router.get("/factor/{name}", response_model=FactorResponse)
+    @router.get("/factor/{name}", response_model=FactorResponse, dependencies=[ReadAccess])
     def factor(
         name: str,
         horizon: int = Query(21, ge=1, le=252),

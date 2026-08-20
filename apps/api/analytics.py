@@ -22,6 +22,7 @@ from functools import lru_cache
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 
+from apps.api.auth import ReadAccess
 from apps.api.schemas import (
     CrossSectionResponse,
     HorizonReturn,
@@ -104,7 +105,7 @@ def _windowed(history: pl.DataFrame, sessions: int) -> pl.DataFrame:
 
 
 def _register_search(router: APIRouter) -> None:
-    @router.get("/symbols")
+    @router.get("/symbols", dependencies=[ReadAccess])
     def symbols(q: str = Query("", max_length=32)) -> list[dict[str, object]]:
         """Symbol search, ranked by liquidity.
 
@@ -133,7 +134,7 @@ def _register_search(router: APIRouter) -> None:
 
 
 def _register_security(router: APIRouter) -> None:
-    @router.get("/security/{symbol}", response_model=SecurityResponse)
+    @router.get("/security/{symbol}", response_model=SecurityResponse, dependencies=[ReadAccess])
     def security(symbol: str, sessions: int = Query(0, ge=0)) -> SecurityResponse:
         try:
             history = _windowed(_panel(), sessions)
@@ -189,7 +190,7 @@ def _register_security(router: APIRouter) -> None:
             fat_left_tail=p.fat_left_tail,
         )
 
-    @router.get("/security/{symbol}/series")
+    @router.get("/security/{symbol}/series", dependencies=[ReadAccess])
     def series(symbol: str, sessions: int = Query(0, ge=0)) -> dict[str, list[object]]:
         """Back-adjusted close series, for charting."""
         history = _windowed(_panel(), sessions)
@@ -204,7 +205,7 @@ def _register_security(router: APIRouter) -> None:
 
 
 def _register_cross_section(router: APIRouter) -> None:
-    @router.get("/crosssection", response_model=CrossSectionResponse)
+    @router.get("/crosssection", response_model=CrossSectionResponse, dependencies=[ReadAccess])
     def crosssection(
         symbols: str = Query(..., description="Comma-separated symbols"),
         sessions: int = Query(750, ge=0),
@@ -256,7 +257,7 @@ def _register_cross_section(router: APIRouter) -> None:
 
 
 def _register_screen(router: APIRouter) -> None:
-    @router.get("/screen", response_model=ScreenResponse)
+    @router.get("/screen", response_model=ScreenResponse, dependencies=[ReadAccess])
     def screen(
         sort: str = Query("liquidity"),
         limit: int = Query(25, ge=1, le=200),

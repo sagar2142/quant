@@ -148,6 +148,28 @@ by writing code:
 - **M11** wants human attestations — legal advice, tax position, tested kill
   switch. Run `python -m apps.cli.readiness` to see the list.
 
+### Console API authentication
+
+The API is unauthenticated on loopback for *reads* and refuses *mutations*
+until you configure a token:
+
+```powershell
+# generate one, put it in .env, restart both servers
+NEUTRON_API_TOKEN=<64 hex chars>
+
+# the console picks it up from the same variable
+$env:NEUTRON_API_TOKEN="..."; $env:NEUTRON_API_PORT=8010; npm run dev
+```
+
+**Unset**: analytics and screens work; `/kill` and `/kill/release` return 503.
+An install that was never configured cannot release a halt, which is the
+fail-safe direction — engaging a halt is recoverable, releasing one is not.
+
+**Set**: required on every endpoint, reads included. The dev-server proxy
+injects it so the token never reaches browser JavaScript.
+
+**Required before this API binds to anything but 127.0.0.1.**
+
 ### Nothing here trades
 
 `NEUTRON_LIVE_ENABLED` defaults to `false`. Four independent guards stand between

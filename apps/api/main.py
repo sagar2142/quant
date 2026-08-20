@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from apps.api.analytics import build_analytics_router
+from apps.api.auth import ReadAccess, WriteAccess
 from apps.api.book import build_book_router
 from apps.api.research import build_research_router
 from core.clock import utc_now
@@ -115,7 +116,7 @@ def create_app(
     # The fast research loop: score a signal without backtesting it.
     app.include_router(build_research_router())
 
-    @app.get("/health")
+    @app.get("/health", dependencies=[ReadAccess])
     def health() -> dict[str, object]:
         return {
             "status": "ok",
@@ -125,7 +126,7 @@ def create_app(
             "as_of": utc_now().isoformat(),
         }
 
-    @app.get("/vitals", response_model=VitalsResponse)
+    @app.get("/vitals", response_model=VitalsResponse, dependencies=[ReadAccess])
     def vitals() -> VitalsResponse:
         """The bar that never scrolls away (§12.7).
 
@@ -143,7 +144,7 @@ def create_app(
             kill_engaged=risk.is_killed,
         )
 
-    @app.post("/kill", response_model=KillResponse)
+    @app.post("/kill", response_model=KillResponse, dependencies=[WriteAccess])
     def engage_kill(request: KillRequest) -> KillResponse:
         """Halt all new orders.
 
@@ -159,7 +160,7 @@ def create_app(
         router.kill_switch(engaged=True, by=request.operator, reason=request.reason)
         return KillResponse(engaged=True, reason=request.reason, operator=request.operator)
 
-    @app.post("/kill/release", response_model=KillResponse)
+    @app.post("/kill/release", response_model=KillResponse, dependencies=[WriteAccess])
     def release_kill(request: KillRequest) -> KillResponse:
         """Resume trading. Manual only — there is deliberately no auto-release."""
         try:

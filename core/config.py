@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     #: explicitly true, whatever any strategy or agent believes (§21).
     live_enabled: bool = Field(default=False)
 
+    #: Console API token. Empty means reads are open on loopback and the kill
+    #: switch is disabled outright — an install that was never configured
+    #: cannot release a halt, which is the fail-safe direction (§21).
+    #: Set it before exposing this API beyond 127.0.0.1.
+    api_token: str = ""
+
     @property
     def lake(self) -> Path:
         path = self.lake_path.expanduser().resolve()
