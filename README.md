@@ -44,6 +44,11 @@ start. To reapply from scratch: `docker compose down -v; docker compose up -d po
 # Backtest + gauntlet as one self-contained HTML file you can keep
 .\.venv\Scripts\python.exe -m apps.cli.report --top 30 --out reports\momentum.html
 
+# New here? The research loop, explained end to end
+.\.venv\Scripts\python.exe -m apps.cli.tutorial
+.\.venv\Scripts\python.exe -m apps.cli.tutorial --principles
+# ...or the Tutorial screen in the console (key 't'), shown on first visit
+
 # Factor lab — score a signal against forward returns in about a second
 .\.venv\Scripts\python.exe -m apps.cli.factor momentum_12_1
 .\.venv\Scripts\python.exe -m apps.cli.factor --all

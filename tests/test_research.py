@@ -131,7 +131,13 @@ class TestFactorConstruction:
         assert values["CALM"] > values["WILD"]
 
     def test_every_factor_builds(self):
-        frame = pl.concat([panel({f"N{i}": walk(seed=i)}) for i in range(4)])
+        """Long enough for the deepest factor.
+
+        `residual_momentum` needs 252 bars of beta before its own 252-bar
+        window opens, so a 400-session fixture would silently produce an empty
+        frame and the test would be asserting nothing.
+        """
+        frame = pl.concat([panel({f"N{i}": walk(600, seed=i)}) for i in range(4)])
         for factor in Factor:
             scored = build_factor(frame, FactorSpec(factor))
             assert not scored.is_empty(), factor.value

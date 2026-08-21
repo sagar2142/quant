@@ -14,6 +14,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Analytics } from "./components/Analytics";
 import { Factors } from "./components/Factors";
+import { Tutorial } from "./components/Tutorial";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import {
@@ -28,7 +29,11 @@ import {
 import "./tokens.css";
 import "./shell.css";
 
-type Screen = "overview" | "factors" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
+//: Marks that the tutorial has been shown, so it opens once and is a
+//: reference thereafter.
+const SEEN_TUTORIAL = "neutron.tutorial.seen";
+
+type Screen = "tutorial" | "overview" | "factors" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
 
 const SCREENS: {
   id: Screen;
@@ -37,6 +42,7 @@ const SCREENS: {
   key: string;
   group: "Analysis" | "Operations";
 }[] = [
+  { group: "Analysis", id: "tutorial", label: "Tutorial", icon: "?", key: "t" },
   { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
   { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
   { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
@@ -269,7 +275,28 @@ export function App({
   state: ConsoleState;
   onKill: (reason: string) => void;
 }) {
-  const [screen, setScreen] = useState<Screen>("factors");
+  // First visit opens the tutorial. What a new operator lacks is not button
+  // locations but the order of operations, and someone who starts at the
+  // backtester reads a rising curve as a discovery rather than as the first of
+  // twelve questions.
+  const [screen, setScreen] = useState<Screen>(() => {
+    try {
+      return window.localStorage.getItem(SEEN_TUTORIAL) ? "factors" : "tutorial";
+    } catch {
+      // Private browsing and some hardened configurations throw on access.
+      // Losing the preference is harmless; failing to render is not.
+      return "factors";
+    }
+  });
+
+  useEffect(() => {
+    if (screen !== "tutorial") return;
+    try {
+      window.localStorage.setItem(SEEN_TUTORIAL, "1");
+    } catch {
+      /* see above */
+    }
+  }, [screen]);
   // Set when a screener row is clicked, so the analytics screen opens on that
   // name. Keyed on the component so it remounts and refetches.
   const [picked, setPicked] = useState<string | null>(null);
@@ -334,6 +361,11 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "tutorial" ? (
+              <Panel title="How this system works" flush>
+                <Tutorial onDismiss={() => setScreen("factors")} />
+              </Panel>
+            ) : null}
             {screen === "factors" ? (
               <Panel title="Factor research" flush>
                 <Factors />
