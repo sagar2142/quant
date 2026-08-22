@@ -108,6 +108,10 @@ class FactorOverlap:
     observations: int
     #: Pairs above the reporting threshold, worst first.
     redundant_pairs: list[tuple[str, str, float]] = field(default_factory=list)
+    #: Factors that produced no signal over the window and were left out, with
+    #: the reason. Reported rather than dropped quietly: a factor missing from
+    #: a correlation matrix changes what the matrix means.
+    skipped: list[tuple[str, str]] = field(default_factory=list)
 
     def format(self) -> str:
         lines = [
@@ -118,6 +122,9 @@ class FactorOverlap:
         if self.redundant_pairs:
             lines.append("  overlapping pairs:")
             lines.extend(f"    {a:<22} {b:<22} {rho:+.2f}" for a, b, rho in self.redundant_pairs)
+        if self.skipped:
+            lines.append("  left out of the matrix:")
+            lines.extend(f"    {name:<22} {why}" for name, why in self.skipped)
         return "\n".join(lines)
 
 
@@ -213,6 +220,7 @@ def factor_correlations(
     """
     joined: pl.DataFrame | None = None
     names: list[str] = []
+    skipped: list[tuple[str, str]] = []
     # Deduplicated for the same reason as `aligned_returns`: each factor
     # becomes a column keyed by its own name, and a repeat would either
     # silently correlate a factor with itself or collide on the join.
@@ -220,16 +228,28 @@ def factor_correlations(
         scored = build_factor(
             history, FactorSpec(factor, min_adv=min_adv, window=window), (21,)
         ).select("event_time", "symbol", pl.col("signal").alias(factor.value))
+
+        # A factor whose lookback is deeper than the window scores nothing, and
+        # the join below is an inner one: leaving it in would empty the matrix
+        # and report every *other* factor as zero-correlated rather than
+        # naming the one that was missing. `seasonality` needs three years and
+        # so does exactly this on the default 750-session window.
+        if scored.is_empty():
+            skipped.append((factor.value, f"no signal over {window} sessions — lookback too deep"))
+            continue
+
         names.append(factor.value)
         joined = scored if joined is None else joined.join(scored, on=["event_time", "symbol"])
 
     if joined is None or joined.is_empty():
-        return FactorOverlap([], np.empty((0, 0)), 0.0, 0.0, 0)
+        return FactorOverlap([], np.empty((0, 0)), 0.0, 0.0, 0, skipped=skipped)
 
     ranked = joined.with_columns([pl.col(n).rank().over("event_time") for n in names])
     matrix = ranked.select(names).drop_nulls().to_numpy().astype(np.float64)
     if matrix.shape[0] < MIN_NAMES:
-        return FactorOverlap(names, np.empty((0, 0)), 0.0, 0.0, int(matrix.shape[0]))
+        return FactorOverlap(
+            names, np.empty((0, 0)), 0.0, 0.0, int(matrix.shape[0]), skipped=skipped
+        )
 
     correlation = np.corrcoef(matrix, rowvar=False)
     eigenvalues = np.linalg.eigvalsh(correlation)[::-1]
@@ -248,6 +268,7 @@ def factor_correlations(
         first_component=float(eigenvalues[0] / eigenvalues.sum()),
         observations=int(matrix.shape[0]),
         redundant_pairs=sorted(pairs, key=lambda p: -abs(p[2])),
+        skipped=skipped,
     )
 
 

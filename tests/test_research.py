@@ -24,6 +24,7 @@ from quant.analytics.rolling import (
     rolling_volatility,
 )
 from quant.research.factors import (
+    SEASONALITY_YEARS,
     Factor,
     FactorSpec,
     add_forward_returns,
@@ -133,11 +134,14 @@ class TestFactorConstruction:
     def test_every_factor_builds(self):
         """Long enough for the deepest factor.
 
-        `residual_momentum` needs 252 bars of beta before its own 252-bar
-        window opens, so a 400-session fixture would silently produce an empty
-        frame and the test would be asserting nothing.
+        `seasonality` averages the same calendar month across SEASONALITY_YEARS
+        prior years, so it needs three years of history plus the month it
+        averages — deeper than `residual_momentum`, which wants 252 bars of
+        beta before its own 252-bar window opens. Too short a fixture produces
+        an empty frame rather than an error, and the test would assert nothing.
         """
-        frame = pl.concat([panel({f"N{i}": walk(600, seed=i)}) for i in range(4)])
+        sessions = SEASONALITY_YEARS * 252 + 63
+        frame = pl.concat([panel({f"N{i}": walk(sessions, seed=i)}) for i in range(4)])
         for factor in Factor:
             scored = build_factor(frame, FactorSpec(factor))
             assert not scored.is_empty(), factor.value
@@ -153,7 +157,7 @@ class TestFactorConstruction:
 
 
 class TestInformationCoefficient:
-    def perfect_panel(self, names: int = 40, sessions: int = 200) -> pl.DataFrame:
+    def perfect_panel(self, names: int = 40, sessions: int = 300) -> pl.DataFrame:
         """A panel where the signal predicts the forward return exactly.
 
         Each name gets a fixed drift; the 12-1 signal then ranks names in the
@@ -207,7 +211,7 @@ class TestQuantiles:
         in another, measuring the calendar rather than the signal."""
         rng = np.random.default_rng(SEED)
         series = {
-            f"N{i:02d}": list(100.0 * np.exp(np.cumsum(rng.normal((i - 15) * 0.0008, 0.004, 200))))
+            f"N{i:02d}": list(100.0 * np.exp(np.cumsum(rng.normal((i - 15) * 0.0008, 0.004, 300))))
             for i in range(30)
         }
         scored = build_factor(panel(series), FactorSpec(Factor.MOMENTUM_1M), (5,))
@@ -218,7 +222,7 @@ class TestQuantiles:
     def test_a_predictive_signal_is_monotonic(self):
         rng = np.random.default_rng(SEED)
         series = {
-            f"N{i:02d}": list(100.0 * np.exp(np.cumsum(rng.normal((i - 15) * 0.001, 0.002, 220))))
+            f"N{i:02d}": list(100.0 * np.exp(np.cumsum(rng.normal((i - 15) * 0.001, 0.002, 300))))
             for i in range(30)
         }
         scored = build_factor(panel(series), FactorSpec(Factor.MOMENTUM_1M), (5,))

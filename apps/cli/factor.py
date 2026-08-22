@@ -186,9 +186,9 @@ def run(argv: list[str] | None = None) -> int:
             ).format()
         )
         print()
-        print("  A library of nine worth six independent bets is not a library of nine.")
-        print("  Combining duplicates counts the same effect twice and calls it")
-        print("  diversification.")
+        print("  A library of sixteen worth six independent bets is not a library")
+        print("  of sixteen. Combining duplicates counts the same effect twice and")
+        print("  calls it diversification.")
         return 0
 
     if args.combine:

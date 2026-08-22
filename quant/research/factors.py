@@ -181,6 +181,13 @@ class FactorSpec:
     min_adv: float = 1e7
     #: Sessions of history used. 0 uses everything available.
     window: int = 0
+    #: Make prices continuous across inferred splits before scoring.
+    #:
+    #: **On by default.** The panel stores raw closes, and 593 of 2,575 equity
+    #: names carry at least one session move above 35% in the last thousand
+    #: sessions. Every one enters momentum as a real return: a 1:1 bonus reads
+    #: as -50%. Off only to measure what the contamination was worth.
+    adjust_splits: bool = True
     #: Restrict to listed companies, excluding ETFs and mutual funds.
     #:
     #: **On by default, and it is not cosmetic.** NSE lists cash and liquid
@@ -209,6 +216,20 @@ def prepare_panel(history: pl.DataFrame, spec: FactorSpec) -> pl.DataFrame:
         recent = frame["event_time"].unique().sort().tail(spec.window)
         frame = frame.filter(pl.col("event_time").is_in(recent.implode()))
 
+    # Sorted once, here, rather than on the way out: the split inference needs
+    # the order anyway, and sorting a panel this size is the most expensive
+    # single step in the function. Every filter below preserves row order.
+    frame = frame.sort(["symbol", "event_time"])
+
+    if spec.adjust_splits:
+        # Before the liquidity filter: a split moves both price and volume, so
+        # an unadjusted traded-value median straddling one is wrong too.
+        from data.corpactions.inferred import (  # noqa: PLC0415 - keeps data off the import path
+            adjust_for_inferred_splits,
+        )
+
+        frame = adjust_for_inferred_splits(frame, already_sorted=True)
+
     if spec.equities_only:
         frame = frame.filter(pl.col("instrument_id").str.contains(EQUITY_ISIN_MARKER, literal=True))
 
@@ -220,7 +241,34 @@ def prepare_panel(history: pl.DataFrame, spec: FactorSpec) -> pl.DataFrame:
         )
         frame = frame.filter(pl.col("symbol").is_in(liquid.implode()))
 
-    return frame.sort(["symbol", "event_time"])
+    # Enforced rather than merely declared: a name with fifty bars produces a
+    # null momentum score that is silently dropped later, and the count of
+    # names in a report would then include instruments that contributed
+    # nothing.
+    long_enough = (
+        frame.group_by("symbol").agg(pl.len().alias("bars")).filter(pl.col("bars") >= MIN_BARS)
+    )["symbol"]
+    return frame.filter(pl.col("symbol").is_in(long_enough.implode()))
+
+
+#: Prior years averaged by the seasonality factor. Three is what a seven-year
+#: panel supports; more would drop most names for want of history.
+SEASONALITY_YEARS = 3
+
+
+def _seasonality_expression() -> pl.Expr:
+    """Mean return in this calendar month across prior years (Heston-Sadka).
+
+    Averaged over several years, not read from one. A single year-ago monthly
+    return is one noisy observation, and calling it a seasonality factor claims
+    a statistic it is not.
+    """
+    by = "symbol"
+    monthly = pl.col("close") / pl.col("close").shift(21).over(by) - 1
+    # 252 sessions is a year; the same calendar month one, two and three years
+    # back. Shifted so the current month never contributes to its own score.
+    lagged = [monthly.shift(252 * (year + 1)).over(by) for year in range(SEASONALITY_YEARS)]
+    return sum(lagged[1:], start=lagged[0]) / SEASONALITY_YEARS
 
 
 def _daily_return() -> pl.Expr:
@@ -248,7 +296,7 @@ def _price_expressions() -> dict[Factor, pl.Expr]:
         Factor.MAX_RETURN: -daily.rolling_max(21).over(by),
         Factor.HIGH_52W_PROXIMITY: close / close.rolling_max(252).over(by),
         # Shifted a full year, so the current month never scores itself.
-        Factor.SEASONALITY: (close / close.shift(21).over(by) - 1).shift(252).over(by),
+        Factor.SEASONALITY: _seasonality_expression(),
         Factor.VOLUME_SHOCK: pl.col("volume") / pl.col("volume").rolling_mean(21).over(by),
         # Amihud, negated so that a high score means liquid.
         Factor.ILLIQUIDITY: -(daily.abs() / (close * pl.col("volume"))).rolling_mean(21).over(by),

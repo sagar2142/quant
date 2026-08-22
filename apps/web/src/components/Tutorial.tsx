@@ -52,16 +52,16 @@ const STEPS: Step[] = [
   {
     n: 3,
     title: "Score a signal",
-    cost: "~6 seconds",
+    cost: "~3 min for all 16",
     what:
       "Does this idea predict anything at all? Information Coefficient at four " +
       "horizons, quintile buckets, turnover, and whether the spread survives the " +
-      "22bp NSE round trip. This is the cheapest question, so it goes first.",
+      "22bp NSE round trip. Still the cheapest question, so it goes first.",
     screen: "Factors  (f)",
     command: "python -m apps.cli.factor --all",
     failure:
-      "DIES ON COSTS is the normal outcome — 10 of 16 do. Kill it here and lose six " +
-      "seconds instead of an afternoon.",
+      "DIES ON COSTS is the normal outcome — 12 of 16 do. Kill it here and lose three " +
+      "minutes instead of an afternoon.",
   },
   {
     n: 4,
@@ -81,8 +81,10 @@ const STEPS: Step[] = [
     cost: "~3 seconds",
     what:
       "Z-score, remove the overlap, weight by historical IC. A good composite scores " +
-      "higher than any of its parts — that is the whole reason to combine.",
-    command: "python -m apps.cli.factor --combine momentum_12_7,idiosyncratic_vol",
+      "higher than any of its parts — that is the whole reason to combine. Pair a " +
+      "survivor with a different effect: all four survivors are momentum variants, " +
+      "and combining two of those is the stage-4 trap, not diversification.",
+    command: "python -m apps.cli.factor --combine residual_momentum,reversal_5d",
     failure:
       "Weights are fitted on the sample they are scored against. In-sample by " +
       "construction, which is why this is a candidate and not evidence.",

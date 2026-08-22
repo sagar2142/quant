@@ -190,6 +190,33 @@ class TestFactorOverlap:
         )
         assert "overlapping pairs" in overlap.format()
 
+    def test_a_factor_too_deep_for_the_window_does_not_empty_the_matrix(self):
+        """The join is an inner one, so a factor that scores nothing would take
+        every other factor down with it — and the report then blamed the
+        survivors by showing them as zero rather than naming the absentee.
+
+        `seasonality` needs three years; a 400-session window is not three
+        years, which is exactly the case that broke `--overlap` in practice.
+        """
+        overlap = factor_correlations(
+            wide_panel(),
+            (Factor.MOMENTUM_12_1, Factor.REVERSAL_1D, Factor.SEASONALITY),
+            window=400,
+        )
+        assert overlap.names == ["momentum_12_1", "reversal_1d"]
+        assert overlap.observations > 0
+        assert overlap.effective_factors > 0.0
+
+    def test_a_skipped_factor_is_named_in_the_report(self):
+        overlap = factor_correlations(
+            wide_panel(),
+            (Factor.MOMENTUM_12_1, Factor.REVERSAL_1D, Factor.SEASONALITY),
+            window=400,
+        )
+        assert [name for name, _ in overlap.skipped] == ["seasonality"]
+        assert "left out of the matrix" in overlap.format()
+        assert "seasonality" in overlap.format()
+
 
 class TestComposite:
     def test_a_composite_needs_two_factors(self):

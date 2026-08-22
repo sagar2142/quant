@@ -59,11 +59,11 @@ STAGES = (
     Stage(
         3,
         "Score a signal",
-        "~6 seconds",
+        "~3 min for all 16",
         "Does the idea predict anything? IC at four horizons, quintile buckets,\n"
         "  turnover, and whether the spread survives the 22bp NSE round trip.",
         "python -m apps.cli.factor --all",
-        "DIES ON COSTS is normal — 10 of 16 do. Kill it here, not after an afternoon.",
+        "DIES ON COSTS is normal — 12 of 16 do. Kill it here, not after an afternoon.",
     ),
     Stage(
         4,
@@ -79,8 +79,9 @@ STAGES = (
         "Combine what survived",
         "~3 seconds",
         "Z-score, remove overlap, weight by historical IC. A good composite scores\n"
-        "  higher than any of its parts — that is the reason to combine at all.",
-        "python -m apps.cli.factor --combine momentum_12_7,idiosyncratic_vol",
+        "  higher than any of its parts — that is the reason to combine at all.\n"
+        "  Pair a survivor with a different effect, not with a second momentum.",
+        "python -m apps.cli.factor --combine residual_momentum,reversal_5d",
         "Weights are fitted in-sample. This is a candidate, not evidence.",
     ),
     Stage(
