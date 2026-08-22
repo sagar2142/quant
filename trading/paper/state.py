@@ -31,7 +31,7 @@ from pathlib import Path
 
 from core.clock import require_utc, utc_now
 from core.instruments import InstrumentId
-from engine.accounting import Portfolio, Position
+from engine.accounting import Fill, Portfolio, Position
 
 __all__ = ["PaperState", "PaperStateStore", "StateCorruptError"]
 
@@ -96,6 +96,7 @@ class PaperStateStore:
     root: Path
     state_name: str = "paper_state.json"
     log_name: str = "paper_equity.ndjson"
+    fills_name: str = "paper_fills.ndjson"
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -107,6 +108,10 @@ class PaperStateStore:
     @property
     def log_path(self) -> Path:
         return self.root / self.log_name
+
+    @property
+    def fills_path(self) -> Path:
+        return self.root / self.fills_name
 
     # ── state ───────────────────────────────────────────────────────────────
 
@@ -156,6 +161,53 @@ class PaperStateStore:
         )
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+
+    def append_fill(self, session: date, fill: Fill, symbol: str = "") -> None:
+        """One NDJSON line per applied fill — the blotter's only source.
+
+        Written from the fill the *broker* reported, after it has moved the
+        book, so the log records what happened rather than what was intended.
+        Nothing persisted these before, and the console's Blotter answered
+        "What did I trade?" with "No trades today." after eleven real fills.
+
+        Args:
+            symbol: Display ticker. Optional and never used as identity — the
+                `instrument_id` is the key (§3.3), and a symbol resolved today
+                may not be the one this fill traded under.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {
+                "at": fill.event_time.isoformat(),
+                "session": session.isoformat(),
+                "instrument_id": str(fill.instrument_id),
+                "symbol": symbol,
+                "side": fill.side.value,
+                "quantity": str(fill.quantity),
+                "price": str(fill.price),
+                "costs": str(fill.costs.total),
+            }
+        )
+        with self.fills_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def fill_history(self, limit: int = 0) -> list[dict[str, str]]:
+        """Applied fills, oldest first. `limit` keeps only the most recent N.
+
+        A malformed line is skipped rather than raising: a blotter missing one
+        row is worth more than a screen that will not render.
+        """
+        if not self.fills_path.is_file():
+            return []
+        rows: list[dict[str, str]] = []
+        for line in self.fills_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return rows[-limit:] if limit > 0 else rows
 
     def equity_history(self) -> list[dict[str, str]]:
         if not self.log_path.is_file():

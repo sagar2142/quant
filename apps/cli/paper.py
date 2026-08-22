@@ -257,6 +257,17 @@ def persist_outcome(
     store.append_equity(
         report.session, report.closing_equity, state.portfolio.cash, state.portfolio.fees_paid
     )
+    # After the state, for the same reason the state comes before the alert: a
+    # failure here loses a blotter row, which is recoverable, while a failure
+    # before `save` would lose the cycle's position changes, which is not.
+    #
+    # Written without a symbol on purpose. The `instrument_id` is the identity
+    # (§3.3), and the console resolves today's ticker from the panel when it
+    # renders — the same path positions take. Freezing a symbol into the log
+    # would preserve whatever the name was called on the day it traded and
+    # quietly disagree with every other screen after a rename.
+    for fill in report.filled:
+        store.append_fill(report.session, fill)
     print(f"state saved   : {store.state_path} (cycle {state.cycles})")
 
     announce(alerts, state, report)

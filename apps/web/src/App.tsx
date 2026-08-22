@@ -17,10 +17,12 @@ import { Factors } from "./components/Factors";
 import { Tutorial } from "./components/Tutorial";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
+import { PriceChart } from "./components/Sparkline";
 import {
   directionGlyph,
   formatCount,
   formatLevel,
+  formatMoney,
   formatPercent,
   formatPnL,
   formatPrice,
@@ -76,9 +78,23 @@ export interface Trade {
 
 export interface RiskRow {
   name: string;
-  observed: number;
+  /**
+   * Null for limits checked per order, which a book at rest has no value for.
+   * Rendered as an em dash. This was previously hardcoded to 0, which reads as
+   * "measured, nothing used" — the opposite of what it meant.
+   */
+  observed: number | null;
   threshold: number;
-  passed: boolean;
+  /** Null travels with a null observation: unmeasured is not passing. */
+  passed: boolean | null;
+}
+
+/** What the last reconciliation actually established, if it ran at all. */
+export interface ReconciliationStatus {
+  checked: boolean;
+  halted: boolean;
+  haltReason: string;
+  cycles: number;
 }
 
 export interface Break {
@@ -90,10 +106,18 @@ export interface Break {
 
 export interface ConsoleState {
   vitals: Vitals;
+  /**
+   * Equity at the close of each completed paper cycle, oldest first. This is
+   * the M9 six-week clock: the drift between what a backtest promised and what
+   * actually happened is the single most informative number the system
+   * produces, and `/equity` served it to nobody until it was put on screen.
+   */
+  equity: number[];
   positions: Position[];
   trades: Trade[];
   risk: RiskRow[];
   breaks: Break[];
+  reconciliation: ReconciliationStatus;
   environment: "dev" | "paper" | "live";
   gitSha: string;
   latencyMs: number;
@@ -211,13 +235,18 @@ function RiskTable({ rows }: { rows: RiskRow[] }) {
       </thead>
       <tbody>
         {rows.map((row) => {
-          const used = row.threshold === 0 ? 0 : row.observed / row.threshold;
+          // A null observation has no utilisation. Showing 0% would claim the
+          // budget is untouched when nothing measured it.
+          const used =
+            row.observed === null || row.threshold === 0
+              ? null
+              : row.observed / row.threshold;
           return (
             <tr key={row.name}>
               <td>{row.name}</td>
               <td className="num">{formatPrice(row.observed, 4)}</td>
               <td className="num text-secondary">{formatPrice(row.threshold, 4)}</td>
-              <td className={`num ${row.passed ? "" : "text-critical"}`}>
+              <td className={`num ${row.passed === false ? "text-critical" : ""}`}>
                 {formatLevel(used)}
               </td>
             </tr>
@@ -229,9 +258,40 @@ function RiskTable({ rows }: { rows: RiskRow[] }) {
 }
 
 /** Any non-empty diff is a red banner. An unexplained break halts trading (§9). */
-function Reconciliation({ breaks }: { breaks: Break[] }) {
+function Reconciliation({
+  breaks,
+  status,
+}: {
+  breaks: Break[];
+  status: ReconciliationStatus;
+}) {
+  // "Never checked" and "checked and clean" are different answers, and only
+  // one of them is reassuring. This panel used to give the reassuring one
+  // unconditionally, from an array nothing populated.
+  if (breaks.length === 0 && !status.checked) {
+    return (
+      <div className="empty">
+        Not reconciled. No paper cycle has run, so the broker and the book have
+        not been compared.
+      </div>
+    );
+  }
+  if (breaks.length === 0 && status.halted) {
+    return (
+      <div className="panel-body">
+        <strong className="text-critical">HALTED — {status.haltReason}</strong>
+        <p className="text-secondary">
+          The halt survives restarts by design. Only `--clear-halt` releases it.
+        </p>
+      </div>
+    );
+  }
   if (breaks.length === 0) {
-    return <div className="empty">Broker and internal records agree.</div>;
+    return (
+      <div className="empty">
+        Broker and internal records agree, as of cycle {status.cycles}.
+      </div>
+    );
   }
   return (
     <>
@@ -341,7 +401,27 @@ export function App({
         </nav>
 
         {screen === "overview" ? (
-          <div className="workspace grid-2x2">
+          <div className="workspace overview">
+            <Panel
+              title="Paper equity"
+              flush
+              footer={
+                state.equity.length < 2
+                  ? `${state.equity.length} cycle(s) — the curve needs two`
+                  : `${state.equity.length} cycles · ${formatMoney(
+                      state.equity[state.equity.length - 1],
+                    )}`
+              }
+            >
+              {state.equity.length < 2 ? (
+                <div className="empty">
+                  Not enough cycles to plot. One run per session; the M9 gate
+                  wants six weeks of them.
+                </div>
+              ) : (
+                <PriceChart closes={state.equity} label="paper equity" />
+              )}
+            </Panel>
             <Panel
               title="Positions"
               flush
@@ -356,7 +436,7 @@ export function App({
               <Blotter trades={state.trades} />
             </Panel>
             <Panel title="Reconciliation" flush>
-              <Reconciliation breaks={state.breaks} />
+              <Reconciliation breaks={state.breaks} status={state.reconciliation} />
             </Panel>
           </div>
         ) : (
@@ -403,7 +483,7 @@ export function App({
             ) : null}
             {screen === "reconcile" ? (
               <Panel title="Reconciliation" flush>
-                <Reconciliation breaks={state.breaks} />
+                <Reconciliation breaks={state.breaks} status={state.reconciliation} />
               </Panel>
             ) : null}
           </div>
@@ -415,7 +495,11 @@ export function App({
         <span className={`env-badge env-${state.environment}`}>
           {state.environment.toUpperCase()}
         </span>
-        <span className="mono">{state.gitSha.slice(0, 7)}</span>
+        {/* No build stamp is served yet. An em dash says so; "unknown"
+            truncated to seven characters looks like a real short SHA. */}
+        <span className="mono">
+          {state.gitSha === "unknown" ? "—" : state.gitSha.slice(0, 7)}
+        </span>
         <span>latency {state.latencyMs.toFixed(0)}ms</span>
         <span className="text-secondary">
           drawdown {formatPercent(state.vitals.drawdown)}

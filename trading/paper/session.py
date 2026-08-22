@@ -99,6 +99,9 @@ class CycleReport:
     blocked: list[BlockedOrder] = field(default_factory=list)
     submitted: int = 0
     fills_applied: int = 0
+    #: The fills themselves, in the order the broker reported them. Carried so
+    #: the caller can persist a blotter; `fills_applied` is only their count.
+    filled: list[Fill] = field(default_factory=list)
     fees_paid: Decimal = Decimal(0)
     #: Orders the broker refused. Distinct from risk blocks: these reached the
     #: venue and came back, which in paper signals a plumbing bug.
@@ -295,17 +298,17 @@ class PaperSession:
                     adv_value=inputs.adv.get(broker_fill.instrument_id, Decimal(0)),
                 )
             )
-            portfolio.apply_fill(
-                Fill(
-                    instrument_id=broker_fill.instrument_id,
-                    side=broker_fill.side,
-                    quantity=broker_fill.quantity,
-                    price=broker_fill.price,
-                    costs=costs,
-                    event_time=utc_now(),
-                    multiplier=instrument.multiplier,
-                )
+            fill = Fill(
+                instrument_id=broker_fill.instrument_id,
+                side=broker_fill.side,
+                quantity=broker_fill.quantity,
+                price=broker_fill.price,
+                costs=costs,
+                event_time=utc_now(),
+                multiplier=instrument.multiplier,
             )
+            portfolio.apply_fill(fill)
+            report.filled.append(fill)
             report.fills_applied += 1
             report.fees_paid += costs.total
             marker = broker_fill.broker_fill_id

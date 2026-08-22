@@ -283,7 +283,10 @@ export function Tutorial({ onDismiss }: { onDismiss?: () => void }) {
             <div className="analytics-note text-secondary">
               Operations screens are near-empty until the paper loop has run for
               a while. That is correct — they describe a running book, and one
-              cycle of history is not one.
+              cycle of history is not one. Where a number has not been measured
+              they show an em dash rather than a zero: an unreconciled book is
+              not a clean one, and a bar that has read nothing is not a flat
+              day.
             </div>
           </>
         ) : null}

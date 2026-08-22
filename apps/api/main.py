@@ -27,8 +27,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from apps.api.analytics import build_analytics_router
 from apps.api.auth import ReadAccess, WriteAccess
-from apps.api.book import build_book_router
+from apps.api.book import DEFAULT_STATE_DIR, _latest_marks, build_book_router
 from apps.api.research import build_research_router
+from apps.api.snapshot import book_snapshot
 from core.clock import utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
@@ -46,21 +47,56 @@ ALLOWED_HOSTS = ("127.0.0.1", "localhost", "testserver")
 STALE_WARN_SECONDS = 2.0
 STALE_CRITICAL_SECONDS = 10.0
 
+#: The paper loop runs once per trading session, so its staleness is measured
+#: in hours, not the seconds a tick feed is judged by. Applying the tick
+#: thresholds above to a daily batch would paint the feed red permanently and
+#: teach the operator to ignore the colour.
+CYCLE_WARN_SECONDS = 36 * 3600
+CYCLE_CRITICAL_SECONDS = 96 * 3600
+
 
 class FeedStatus(BaseModel):
     name: str
     health: Literal["ok", "degraded", "down"]
 
 
+def _cycle_health(staleness_seconds: float | None) -> Literal["ok", "degraded", "down"]:
+    """Feed health from how long ago the last paper cycle completed.
+
+    No cycle at all reports "down" rather than "ok". A system that has never
+    run is not a healthy one, and green on an unstarted book is the same lie as
+    a zero drawdown on a losing one.
+    """
+    if staleness_seconds is None:
+        return "down"
+    if staleness_seconds >= CYCLE_CRITICAL_SECONDS:
+        return "down"
+    if staleness_seconds >= CYCLE_WARN_SECONDS:
+        return "degraded"
+    return "ok"
+
+
 class VitalsResponse(BaseModel):
+    """The bar that never scrolls away (§12.7).
+
+    Every quantity is nullable, and that is the point: `None` means "not
+    measured", which the console renders as an em dash. These fields were
+    previously hardcoded to zero, so a book three days stale with a 0.15%
+    drawdown displayed as a live, flat, healthy one.
+    """
+
     feeds: list[FeedStatus]
-    staleness_seconds: float
-    day_pnl: Decimal
-    day_pnl_pct: Decimal
-    drawdown: Decimal
+    staleness_seconds: float | None
+    day_pnl: Decimal | None
+    day_pnl_pct: Decimal | None
+    drawdown: Decimal | None
     ladder_rungs: list[Decimal]
-    risk_utilisation: Decimal
+    risk_utilisation: Decimal | None
     kill_engaged: bool
+    #: False when no paper state exists. The console says "not started" rather
+    #: than showing a flat book that was never traded.
+    book_present: bool = False
+    cycles: int = 0
 
 
 class KillRequest(BaseModel):
@@ -130,27 +166,40 @@ def create_app(
     def vitals() -> VitalsResponse:
         """The bar that never scrolls away (§12.7).
 
-        Placeholder values until the paper-trading daemon publishes real state;
-        the shape is what the console binds to.
+        Read from the paper state file the daemon writes each cycle — the same
+        file the book and reconciliation read, so there is no second source to
+        drift out of sync with. Anything not derivable from it is null, never
+        zero.
         """
+        snapshot = book_snapshot(DEFAULT_STATE_DIR, _latest_marks(None))
+
+        utilisation: Decimal | None = None
+        if snapshot.gross_exposure is not None:
+            limit = risk.limits.max_gross_exposure_pct
+            if limit > 0:
+                utilisation = snapshot.gross_exposure / limit
+
         return VitalsResponse(
-            feeds=[FeedStatus(name="nse", health="ok")],
-            staleness_seconds=0.0,
-            day_pnl=Decimal(0),
-            day_pnl_pct=Decimal(0),
-            drawdown=Decimal(0),
+            feeds=[FeedStatus(name="paper", health=_cycle_health(snapshot.staleness_seconds))],
+            staleness_seconds=snapshot.staleness_seconds,
+            day_pnl=snapshot.day_pnl,
+            day_pnl_pct=snapshot.day_pnl_pct,
+            drawdown=snapshot.drawdown,
             ladder_rungs=[r.drawdown_pct for r in risk.ladder.rungs],
-            risk_utilisation=Decimal(0),
+            risk_utilisation=utilisation,
             kill_engaged=risk.is_killed,
+            book_present=snapshot.present,
+            cycles=snapshot.cycles,
         )
 
     @app.post("/kill", response_model=KillResponse, dependencies=[WriteAccess])
     def engage_kill(request: KillRequest) -> KillResponse:
         """Halt all new orders.
 
-        The only mutating endpoint. Both a reason and an operator are required:
-        an unattributed halt with no stated cause cannot be reviewed afterwards,
-        and the same constraint exists in the database and in the engine.
+        One of only two mutating endpoints, the other being its release. Both a
+        reason and an operator are required: an unattributed halt with no stated
+        cause cannot be reviewed afterwards, and the same constraint exists in
+        the database and in the engine.
         """
         try:
             risk.engage_kill(request.reason, request.operator)

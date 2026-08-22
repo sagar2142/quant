@@ -212,6 +212,18 @@
   grid-template-rows: 1fr 1fr;
 }
 
+/* Equity spans the full width above the 2x2 block: the curve is the thing an
+   operator looks at first, and a chart squeezed into a quarter tile is a
+   decoration rather than a reading. */
+.workspace.overview {
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: auto 1fr 1fr;
+}
+
+.workspace.overview > .panel:first-child {
+  grid-column: 1 / -1;
+}
+
 .panel {
   display: flex;
   flex-direction: column;

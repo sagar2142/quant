@@ -25,25 +25,39 @@ import {
 
 export type FeedHealth = "ok" | "degraded" | "down";
 
+/**
+ * Every quantity is nullable, and the distinction is load-bearing: null means
+ * "not measured" and renders as an em dash. These were previously fixed zeros,
+ * so a book three days stale with a real drawdown displayed as live and flat.
+ */
 export interface Vitals {
   feeds: { name: string; health: FeedHealth }[];
-  stalenessSeconds: number;
-  dayPnl: number;
-  dayPnlPct: number;
-  drawdown: number;
+  stalenessSeconds: number | null;
+  dayPnl: number | null;
+  dayPnlPct: number | null;
+  /** Negative, matching the rungs: -0.0015 is a 0.15% drawdown. */
+  drawdown: number | null;
   /** Ladder rungs, shallowest first, e.g. [-0.05, -0.08, -0.10]. */
   ladderRungs: number[];
-  riskUtilisation: number;
+  riskUtilisation: number | null;
   killEngaged: boolean;
 }
 
-/** §12.7: amber above 2s, critical above 10s. */
-const STALE_WARN_SECONDS = 2;
-const STALE_CRITICAL_SECONDS = 10;
+/**
+ * The paper loop runs once per session, so its staleness is judged in hours.
+ * §12.7's 2s/10s thresholds describe a live tick feed; applied to a daily
+ * batch they would paint the bar red permanently, which teaches the operator
+ * to stop reading the colour.
+ */
+const CYCLE_WARN_SECONDS = 36 * 3600;
+const CYCLE_CRITICAL_SECONDS = 96 * 3600;
 
-function stalenessClass(seconds: number): string {
-  if (seconds > STALE_CRITICAL_SECONDS) return "text-critical";
-  if (seconds > STALE_WARN_SECONDS) return "text-warn";
+function stalenessClass(seconds: number | null): string {
+  // Unknown staleness is critical, not neutral: a cycle that has never run is
+  // not a healthy one.
+  if (seconds === null) return "text-critical";
+  if (seconds > CYCLE_CRITICAL_SECONDS) return "text-critical";
+  if (seconds > CYCLE_WARN_SECONDS) return "text-warn";
   return "text-secondary";
 }
 
@@ -59,8 +73,10 @@ function healthClass(health: FeedHealth): string {
  * Drawdown position on the pre-committed ladder (§8). Filled blocks show how
  * many rungs have engaged — the same information the risk engine acts on.
  */
-function LadderMeter({ drawdown, rungs }: { drawdown: number; rungs: number[] }) {
-  const engaged = rungs.filter((rung) => drawdown <= rung).length;
+function LadderMeter({ drawdown, rungs }: { drawdown: number | null; rungs: number[] }) {
+  // An unmeasured drawdown engages nothing. Rungs are negative, and so is
+  // `drawdown`, so this comparison reads "deeper than the rung".
+  const engaged = drawdown === null ? 0 : rungs.filter((rung) => drawdown <= rung).length;
   return (
     <span className="ladder" title={`ladder: ${engaged}/${rungs.length} rungs engaged`}>
       {rungs.map((rung, index) => (
@@ -85,7 +101,18 @@ function KillButton({
   const [typed, setTyped] = useState("");
 
   if (engaged) {
-    return <span className="kill-engaged">KILLED</span>;
+    // No release button, deliberately. Engaging a halt is fail-safe; releasing
+    // one is the last thing standing between a known-bad book and the market,
+    // and it should cost more than a click from the screen that halted it. The
+    // badge names the path out so the operator is not left guessing.
+    return (
+      <span
+        className="kill-engaged"
+        title="Release is manual: POST /kill/release, or `python -m apps.cli.paper --clear-halt`"
+      >
+        KILLED
+      </span>
+    );
   }
 
   if (!confirming) {
