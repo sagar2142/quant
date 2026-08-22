@@ -312,3 +312,73 @@ class TestStrategyContract:
     def test_sma_rejects_inverted_windows(self):
         with pytest.raises(ValueError, match="must be shorter"):
             SmaCrossover(fast=50, slow=20)
+
+
+class TestEquityIsStampedWhenItHappened:
+    """A fill on bar T+1 must appear in the row for T+1, not the row for T.
+
+    The equity row used to be appended *after* the bar's orders executed, so
+    the resulting position was booked into the decision bar and marked at that
+    bar's close — a price from before the trade. A buy filled at an open of 130
+    against a close of 100 showed a 23% loss on the bar preceding the trade.
+    Terminal wealth was right; every path-dependent metric computed from the
+    curve was not.
+    """
+
+    def gapped(self, execution_open: float, n: int = 8) -> pl.DataFrame:
+        """Flat closes at 100; only the execution bar's open differs."""
+        events = [T0 + timedelta(days=i) for i in range(n)]
+        opens = [100.0] * n
+        opens[2] = execution_open
+        return pl.DataFrame(
+            {
+                "event_time": events,
+                "receive_time": [t + timedelta(hours=1) for t in events],
+                "instrument_id": [IID] * n,
+                "open": opens,
+                "high": [max(o, 100.0) * 1.001 for o in opens],
+                "low": [min(o, 100.0) * 0.999 for o in opens],
+                "close": [100.0] * n,
+                "volume": [1_000_000.0] * n,
+            },
+            schema_overrides={
+                "event_time": pl.Datetime("us", "UTC"),
+                "receive_time": pl.Datetime("us", "UTC"),
+            },
+        )
+
+    def run(self, execution_open: float):
+        return engine(BuyAndHold(), rebalance_threshold=Decimal("0.5")).run(
+            self.gapped(execution_open), universe=(IID,)
+        )
+
+    def test_the_bar_before_the_trade_is_untouched_by_it(self):
+        result = self.run(130.0)
+        trade_ts = result.trades["event_time"][0]
+        curve = result.equity_curve
+        before = curve.filter(pl.col("event_time") < trade_ts)["equity"].to_list()
+        assert before, "expected at least one pre-trade bar"
+        assert all(e == pytest.approx(1_000_000.0) for e in before)
+
+    def test_the_entry_gap_lands_on_the_trade_bar(self):
+        result = self.run(130.0)
+        trade_ts = result.trades["event_time"][0]
+        curve = result.equity_curve
+        on_bar = curve.filter(pl.col("event_time") == trade_ts)["equity"][0]
+        assert on_bar < 800_000.0
+
+    def test_a_favourable_gap_moves_the_same_way(self):
+        """Symmetric: the misattribution was not directional, which is why it
+        survived — it never made anything look obviously wrong."""
+        result = self.run(70.0)
+        trade_ts = result.trades["event_time"][0]
+        before = result.equity_curve.filter(pl.col("event_time") < trade_ts)["equity"].to_list()
+        assert all(e == pytest.approx(1_000_000.0) for e in before)
+
+    def test_terminal_wealth_is_unchanged_by_the_timing(self):
+        """The correction re-times P&L; it does not create or destroy any."""
+        assert self.run(100.0).equity_curve["equity"][-1] == pytest.approx(998_819.70, abs=1.0)
+
+    def test_the_curve_has_one_row_per_bar(self):
+        result = self.run(100.0)
+        assert result.equity_curve.height == 8

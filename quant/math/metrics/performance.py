@@ -74,6 +74,26 @@ def returns_from_equity(equity: npt.ArrayLike) -> FloatArray:
     return np.asarray(rets[np.isfinite(rets)], dtype=np.float64)
 
 
+#: A dispersion below this fraction of the series' own scale is numerical
+#: noise, not risk. `np.std` of a constant array is ~1e-19 rather than exactly
+#: zero, so an `== 0.0` guard never fires and the ratio divides by the noise.
+VARIANCE_FLOOR = 1e-12
+
+
+def _has_variance(dispersion: float, series: FloatArray) -> bool:
+    """Whether a dispersion is real rather than floating-point residue.
+
+    Scaled against the series itself: an absolute floor would call a genuine
+    but tiny return stream constant. A constant series of 0.001/day produced a
+    Sharpe of 7.3e16 against a docstring promising 0.0 — and every consumer of
+    that number treats a large Sharpe as good news.
+    """
+    if not np.isfinite(dispersion) or dispersion <= 0.0:
+        return False
+    scale = float(np.max(np.abs(series))) if series.size else 0.0
+    return dispersion > VARIANCE_FLOOR * max(scale, 1.0)
+
+
 def sharpe_ratio(
     returns: npt.ArrayLike,
     risk_free: float = 0.0,
@@ -92,7 +112,7 @@ def sharpe_ratio(
     excess = rets - risk_free / periods_per_year
     # ddof=1: this is a sample, not the population.
     volatility = float(np.std(excess, ddof=1))
-    if volatility == 0.0:
+    if not _has_variance(volatility, excess):
         return 0.0
     ratio = float(np.mean(excess)) / volatility
     return ratio * np.sqrt(periods_per_year) if annualise else ratio
@@ -117,7 +137,7 @@ def sortino_ratio(
     if downside.size == 0:
         return 0.0  # no losing periods in sample: undefined, not infinite
     downside_dev = float(np.sqrt(np.mean(downside**2)))
-    if downside_dev == 0.0:
+    if not _has_variance(downside_dev, downside):
         return 0.0
     return float(float(np.mean(excess)) / downside_dev * np.sqrt(periods_per_year))
 
@@ -132,7 +152,13 @@ def max_drawdown(returns: npt.ArrayLike) -> float:
     rets = _clean(returns)
     if rets.size == 0:
         return 0.0
-    equity = np.cumprod(1.0 + rets)
+    # The curve starts at 1.0 *before* the first return. Without that leading
+    # point the first bar is its own peak, so a decline beginning at inception
+    # is invisible: [-0.5, +0.5] reported 0.00% against a true -50%. The error
+    # only ever runs one way — it understates — and it bites hardest on the
+    # short windows the gauntlet is built from, where a fold that opens with a
+    # loss looks more survivable than it was.
+    equity = np.concatenate([[1.0], np.cumprod(1.0 + rets)])
     peak = np.maximum.accumulate(equity)
     drawdowns = np.asarray(equity / peak - 1.0, dtype=np.float64)
     return float(drawdowns.min())

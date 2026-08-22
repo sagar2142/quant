@@ -91,8 +91,32 @@ class TestSecurityProfile:
 
     def test_implausible_sharpe_is_flagged(self):
         """A single name above 2.5 usually means a missed corporate action."""
+        rng = np.random.default_rng(SEED)
+        strong = 100.0 * np.exp(np.cumsum(rng.normal(0.004, 0.005, 500)))
+        assert profile_security("X", strong).is_implausible
+
+    def test_a_perfectly_smooth_series_is_flagged(self):
+        """Constant daily returns are not a market. This used to be caught only
+        because `np.std` of a constant array is ~1e-19 rather than 0, so the
+        Sharpe overflowed to 7e16 and tripped the gate by accident."""
         smooth = 100.0 * np.exp(np.cumsum(np.full(500, 0.001)))
-        assert profile_security("X", smooth).is_implausible
+        profile = profile_security("X", smooth)
+        assert profile.has_no_variance
+        assert profile.is_implausible
+
+    def test_a_perfectly_flat_series_is_flagged_too(self):
+        """The case the accident missed: dividing by exactly 0.0 scored 0.0 and
+        sailed through. Two identical pathologies, opposite verdicts."""
+        profile = profile_security("X", np.full(500, 100.0))
+        assert profile.has_no_variance
+        assert profile.is_implausible
+
+    def test_a_normal_name_is_not_flagged(self):
+        rng = np.random.default_rng(SEED)
+        ordinary = 100.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.015, 500)))
+        profile = profile_security("X", ordinary)
+        assert not profile.has_no_variance
+        assert not profile.is_implausible
 
     def test_a_fat_left_tail_is_flagged(self):
         """Small gains until ruin — the distribution a Sharpe ratio hides."""

@@ -95,6 +95,13 @@ VOL_COMPRESSED = 0.7
 #: action rather than a discovery.
 IMPLAUSIBLE_SHARPE = 2.5
 
+#: Annualised volatility below which a price series is numerically flat rather
+#: than merely calm. Real NSE equities run 15-60%; even the stillest cash ETF
+#: clears 0.1%. A hundred-thousandth of a percent is floating-point residue —
+#: the constant-return series that produces it has a std of ~1e-19, so
+#: comparing against exact zero misses it entirely.
+MIN_PLAUSIBLE_VOLATILITY = 1e-6
+
 #: Negative skew past this, with excess kurtosis past that, is the "small
 #: gains until ruin" distribution.
 FAT_TAIL_SKEW = -0.5
@@ -164,13 +171,28 @@ class SecurityProfile:
         return "normal"
 
     @property
-    def is_implausible(self) -> bool:
-        """Sharpe above the §2.1 smell test on a single name.
+    def has_no_variance(self) -> bool:
+        """A daily equity price that does not move is not a price series.
 
-        Not impossible — but on price data alone it usually means a corporate
-        action was missed, so it is surfaced rather than celebrated.
+        Stale marks, a back-filled vendor gap, or an instrument that is not
+        really equity. Checked explicitly because it used to be caught only by
+        accident: a *smooth rising* series divided by a float residue of ~1e-19
+        and overflowed the Sharpe to 7e16, which tripped the implausibility
+        gate, while a *perfectly flat* series divided by exactly 0.0, scored
+        0.0, and sailed through. Two identical pathologies, opposite verdicts,
+        decided by floating-point luck.
         """
-        return self.sharpe > IMPLAUSIBLE_SHARPE
+        return self.annual_volatility <= MIN_PLAUSIBLE_VOLATILITY
+
+    @property
+    def is_implausible(self) -> bool:
+        """Sharpe above the §2.1 smell test, or a series with no variance.
+
+        Neither is impossible — but on price data alone both usually mean a
+        corporate action was missed or the marks are stale, so they are
+        surfaced rather than celebrated.
+        """
+        return self.sharpe > IMPLAUSIBLE_SHARPE or self.has_no_variance
 
     @property
     def fat_left_tail(self) -> bool:

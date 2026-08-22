@@ -158,8 +158,16 @@ class BacktestEngine:
 
             marks = self._marks(history, decision_ts)
             last_marks.update(marks)
+
+            # Recorded *before* this bar's orders execute, and that ordering is
+            # the whole point. Orders placed here fill on bar T+1, and appending
+            # afterwards booked the resulting position into the row stamped T
+            # while marking it at T's close — a price from before the trade. A
+            # buy filled at an open of 130 against a close of 100 showed a 23%
+            # loss on the bar *preceding* the trade. The fill now lands in the
+            # row for T+1, valued at T+1's close, where it happened.
+            state.equity.append(self._equity_row(decision_ts, portfolio, last_marks))
             if index + 1 < lookback:
-                state.equity.append(self._equity_row(decision_ts, portfolio, last_marks))
                 continue
 
             view = self._build_view(history, decision_ts, universe)
@@ -177,9 +185,9 @@ class BacktestEngine:
                 if self._execute(state, instrument_id, quantity, execution_slice, execution_ts):
                     result.orders_filled += 1
 
-            state.equity.append(self._equity_row(decision_ts, portfolio, last_marks))
-
         # Value the book on the final bar so the curve ends where the data does.
+        # This is also where the last execution bar's fills are recorded, since
+        # the loop stops one short of it.
         if timestamps:
             last_marks.update(self._marks(history, timestamps[-1]))
             state.equity.append(self._equity_row(timestamps[-1], portfolio, last_marks))

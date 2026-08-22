@@ -273,3 +273,46 @@ class TestBreakdownArithmetic:
         assert "STT" in text
         assert "TOTAL" in text
         assert "depository" not in text  # zero on a buy, so omitted
+
+
+class TestScreenCostMatchesTheModel:
+    """The factor lab's cost verdict must come from the model, not a constant.
+
+    `ROUND_TRIP_COST` was hardcoded at 0.0022 against a model that charges
+    0.0033 on the order the screen actually describes. It printed "DIES ON
+    COSTS" / "survives" from a figure a third too low, with nothing tying it to
+    the model it claimed to be derived from.
+    """
+
+    def test_the_constant_is_derived_from_the_cost_model(self):
+        from apps.cli.factor import ROUND_TRIP_COST, _round_trip_cost
+
+        assert _round_trip_cost() == ROUND_TRIP_COST
+
+    def test_it_covers_both_legs(self):
+        """A round trip is a buy and a sell, so it must exceed either alone."""
+        from apps.cli.factor import ROUND_TRIP_COST
+
+        assert ROUND_TRIP_COST > 0.002
+
+    def test_it_is_not_the_old_stale_figure(self):
+        from apps.cli.factor import ROUND_TRIP_COST
+
+        assert ROUND_TRIP_COST > 0.0022
+
+    def test_it_stays_within_a_plausible_band(self):
+        """Wide, but it catches a model change that silently doubles costs or
+        zeroes them — either would flip verdicts across the whole library."""
+        from apps.cli.factor import ROUND_TRIP_COST
+
+        assert 0.0025 < ROUND_TRIP_COST < 0.0060
+
+    def test_the_depository_fee_makes_the_round_trip_size_dependent(self):
+        """A flat ₹15.34 per scrip per sell-day is 4.6bp on a ₹33,000 order and
+        0.15bp on a ₹1,000,000 one, so no single constant is right for every
+        book. The screen names the order it prices.
+        """
+        from apps.cli.factor import SCREEN_NOTIONAL, SCREEN_PRICE
+
+        assert SCREEN_NOTIONAL > 0
+        assert SCREEN_PRICE > 0

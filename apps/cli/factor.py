@@ -26,23 +26,71 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from decimal import Decimal
 
 import polars as pl
 
 from apps.cli.backtest import load_panel
 from core.config import settings
+from core.instruments import AssetClass, Currency, Exchange, Instrument, InstrumentId
+from core.orders import Side
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
+from engine.costs.india import NseEquityCostModel
+from engine.costs.model import TradeContext
 from quant.research.composite import CompositeSpec, combine_factors, factor_correlations
 from quant.research.factors import FORWARD_HORIZONS, Factor, FactorSpec, build_factor
 from quant.research.ic import FactorReport, analyse_factor, rolling_ic
 
 RULE = "─" * 78
 
-#: NSE delivery round trip, from the hand-verified cost model (§7.1). Used only
-#: to put the quantile spread in context — the real charge comes from
-#: NseEquityCostModel during a backtest.
-ROUND_TRIP_COST = 0.0022
+#: The order this screen prices against: a 30-name book on ₹1,000,000, which is
+#: what `--top 30` and the default capital actually produce. Named because the
+#: round trip is *not* scale-free — the depository fee is a flat ₹15.34 per
+#: scrip per sell-day, so it is 4.6bp on a ₹33,000 order and 0.15bp on a ₹1M
+#: one, and market impact pushes the other way as size grows.
+SCREEN_NOTIONAL = Decimal(1_000_000) / 30
+SCREEN_PRICE = Decimal(1_000)
+
+
+def _round_trip_cost() -> float:
+    """Buy-plus-sell cost as a fraction, from the model the backtester uses.
+
+    Derived rather than hardcoded. The constant here was 0.0022 against a model
+    that charges 0.0033 on this order — the statutory legs alone come to about
+    0.0024, so the old figure was roughly the fee floor with market impact left
+    out entirely. It drifted because nothing tied it to the model, and it is a
+    verdict ("DIES ON COSTS"), not a footnote: understating it by a third moves
+    marginal signals from dead to alive.
+    """
+    instrument = Instrument(
+        instrument_id=InstrumentId("NSE:INE000000000"),
+        symbol="SCREEN",
+        asset_class=AssetClass.EQUITY,
+        exchange=Exchange.NSE,
+        currency=Currency.INR,
+        tick_size=Decimal("0.01"),
+    )
+    model = NseEquityCostModel()
+    quantity = SCREEN_NOTIONAL / SCREEN_PRICE
+    total = sum(
+        model.cost(
+            TradeContext(
+                instrument=instrument,
+                side=side,
+                quantity=quantity,
+                price=SCREEN_PRICE,
+                # Deep enough that impact reflects a liquid name rather than
+                # the screen's own thinness; the min_adv filter enforces this.
+                adv_value=Decimal(10**9),
+            )
+        ).total
+        for side in (Side.BUY, Side.SELL)
+    )
+    return float(total / SCREEN_NOTIONAL)
+
+
+ROUND_TRIP_COST = _round_trip_cost()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
