@@ -176,6 +176,40 @@ class ExperimentRepository(ResultsMixin):
             raise UnregisteredHypothesisError(hypothesis_id)
         return int(found[0])
 
+    def hypothesis(self, hypothesis_id: uuid.UUID) -> Hypothesis:
+        """Load a registered hypothesis by id.
+
+        The counterpart to `ensure_hypothesis`. A caller recording a new run
+        against pre-registered research has the id and needs the rest of the
+        row, and reconstructing it by hand would let the recorded statement
+        drift from the one that was actually registered — which is the whole
+        point of registering it first (§5.1).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT statement, economic_mechanism, prediction, success_criteria, "
+                "kill_criteria, dev_start, dev_end, val_start, val_end, test_start, test_end "
+                "FROM hypotheses WHERE hypothesis_id = %s",
+                [str(hypothesis_id)],
+            )
+            found = cur.fetchone()
+        if found is None:
+            raise UnregisteredHypothesisError(hypothesis_id)
+        return Hypothesis(
+            statement=found[0],
+            economic_mechanism=found[1],
+            prediction=found[2],
+            success_criteria=found[3],
+            kill_criteria=found[4],
+            dev_start=found[5],
+            dev_end=found[6],
+            val_start=found[7],
+            val_end=found[8],
+            test_start=found[9],
+            test_end=found[10],
+            hypothesis_id=hypothesis_id,
+        )
+
     def resolve_hypothesis(self, hypothesis_id: uuid.UUID, status: HypothesisStatus) -> None:
         """Close a hypothesis. `resolved_at` is set by the same statement.
 

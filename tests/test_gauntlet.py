@@ -16,8 +16,10 @@ import numpy as np
 import pytest
 
 from engine.validation.checks import (
+    DSR_THRESHOLD,
     check_cost_sensitivity,
     check_data_integrity,
+    check_deflated_sharpe,
     check_locked_oos,
     check_look_ahead,
     check_parameter_plateau,
@@ -304,6 +306,10 @@ class TestGauntletEndToEnd:
         return GauntletInputs(
             returns=base,
             n_trials=1,  # no search: one idea, tested once
+            # Stated explicitly, because a count nobody can vouch for is not
+            # allowed to pass the DSR check. Buy-and-hold genuinely involved no
+            # search, and that claim is what `trials_verified` records.
+            trials_verified=True,
             seed=SEED,
             shuffled_future_returns=base.copy(),  # no future dependence
             in_sample_returns=base[:500],
@@ -361,3 +367,60 @@ class TestGauntletEndToEnd:
         skipped = [r for r in report.results if r.skipped]
         assert len(skipped) >= 8
         assert all(not r.passed for r in skipped)
+
+
+class TestTrialCountProvenance:
+    """The DSR may report an unverified count but must never pass on one.
+
+    Under-counting trials is the only gauntlet input that moves a strategy
+    exclusively toward accept, and the local number is always the small one: a
+    2.0-Sharpe candidate scores 0.951 against the 16 configurations of a sweep
+    and 0.659 against the 500 a few months of searching produce. The count
+    therefore has to come from the database counter a trigger maintains.
+    """
+
+    def candidate(self, annual_sharpe: float, n: int = 756):
+        rng = np.random.default_rng(9)
+        base = rng.normal(0, 1, n)
+        unit = (base - base.mean()) / base.std(ddof=1)
+        return unit * 0.014 + (annual_sharpe / np.sqrt(252)) * 0.014
+
+    def test_an_unverified_count_cannot_pass(self):
+        returns = self.candidate(2.2)
+        result = check_deflated_sharpe(
+            GauntletInputs(returns=returns, n_trials=16, seed=SEED, trials_verified=False)
+        )
+        assert result.statistic > DSR_THRESHOLD
+        assert not result.passed
+
+    def test_the_report_says_why_it_could_not_pass(self):
+        result = check_deflated_sharpe(
+            GauntletInputs(returns=self.candidate(2.2), n_trials=16, seed=SEED)
+        )
+        assert "UNVERIFIED" in result.reason
+
+    def test_the_same_count_passes_once_vouched_for(self):
+        returns = self.candidate(2.2)
+        result = check_deflated_sharpe(
+            GauntletInputs(returns=returns, n_trials=16, seed=SEED, trials_verified=True)
+        )
+        assert result.passed
+
+    def test_the_true_count_rejects_what_the_sweep_size_accepted(self):
+        """The case the whole change exists for."""
+        returns = self.candidate(2.0)
+        optimistic = check_deflated_sharpe(
+            GauntletInputs(returns=returns, n_trials=16, seed=SEED, trials_verified=True)
+        )
+        honest = check_deflated_sharpe(
+            GauntletInputs(returns=returns, n_trials=500, seed=SEED, trials_verified=True)
+        )
+        assert optimistic.passed
+        assert not honest.passed
+
+    def test_verification_is_off_by_default(self):
+        """A caller that has not thought about provenance gets the safe answer."""
+        assert (
+            GauntletInputs(returns=self.candidate(1.0), n_trials=1, seed=SEED).trials_verified
+            is False
+        )

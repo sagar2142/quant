@@ -96,17 +96,29 @@ def check_look_ahead(inputs: GauntletInputs) -> GauntletResult:
 
 
 def check_deflated_sharpe(inputs: GauntletInputs) -> GauntletResult:
+    """Sharpe deflated by how many trials it took to find this candidate (§5.2).
+
+    **An unverified trial count cannot pass.** The count must come from the
+    database counter, which a trigger maintains across every backtest ever run
+    against the hypothesis. A locally computed number — the size of the sweep
+    in front of you — is always smaller than the truth, and DSR rises steeply
+    as the count falls: a 2.0-Sharpe candidate scores 0.951 against 16 trials
+    and 0.659 against 500. That is the difference between shipping and
+    rejecting, decided by a number nobody checked.
+    """
     result = deflated_sharpe_ratio(
         inputs.returns, inputs.n_trials, periods_per_year=inputs.periods_per_year
     )
+    above_threshold = result.dsr > DSR_THRESHOLD
+    provenance = "" if inputs.trials_verified else "; trial count UNVERIFIED, cannot pass"
     return GauntletResult(
         test="3_deflated_sharpe",
-        passed=result.dsr > DSR_THRESHOLD,
+        passed=above_threshold and inputs.trials_verified,
         statistic=result.dsr,
         threshold=DSR_THRESHOLD,
         reason=(
             f"SR {result.observed_sharpe:.3f} vs expected-max "
-            f"{result.expected_max_sharpe:.3f} over {result.n_trials} trials"
+            f"{result.expected_max_sharpe:.3f} over {result.n_trials} trials{provenance}"
         ),
     )
 

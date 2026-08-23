@@ -9,12 +9,22 @@ parameter sweep, split samples. Nothing is asserted that was not computed.
 Expect rejection. A 90%+ rejection rate is the system working (§5.5); a strategy
 that sails through on the first attempt more likely indicates a broken gauntlet
 than a discovered edge.
+
+**The trial count comes from the database, not from this process.** The
+Deflated Sharpe Ratio divides by how many strategies were tried before this one
+looked good, and that history outlives any single run. Counting only the sweep
+in front of you understates it every time, and DSR climbs steeply as the count
+falls — a 2.0-Sharpe candidate scores 0.951 against 16 trials and 0.659 against
+the 500 a few months of searching produce. So the count is read from
+`hypotheses.n_trials`, which a trigger maintains, and a run that cannot reach it
+reports its DSR but is not permitted to record a pass (§5.2).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from dataclasses import replace
 from decimal import Decimal
 
@@ -43,6 +53,8 @@ from core.instruments import InstrumentId
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.backtest import BacktestConfig, BacktestEngine
+from engine.experiments.recording import RunInputs, record_run
+from engine.experiments.repository import ExperimentRepository, UnregisteredHypothesisError
 from engine.validation import GauntletInputs, run_gauntlet
 from engine.validation.generators import (
     DROPOUT_FRACTION,
@@ -52,9 +64,49 @@ from engine.validation.generators import (
     regime_slices,
     universe_dropout_sharpes,
 )
-from engine.validation.report import MIN_DROPOUT_SAMPLES, MIN_PLACEBO_SAMPLES
+from engine.validation.report import MIN_DROPOUT_SAMPLES, MIN_PLACEBO_SAMPLES, GauntletReport
+from ops.db import optional_connection
 from quant.math.metrics.performance import summarise
 from quant.strategies.baselines import CrossSectionalMomentum
+
+
+def resolve_trials(hypothesis: str | None, sweep_size: int) -> tuple[int, bool]:
+    """Cumulative trials behind this candidate, and whether that is verified.
+
+    The durable count lives in `hypotheses.n_trials`, incremented by a database
+    trigger on every recorded experiment so that no code path can forget it.
+    The sweep about to run has not been recorded yet, so it is added on top.
+
+    Returns:
+        `(n_trials, verified)`. When the database is unreachable or the
+        hypothesis is unknown, the sweep size is returned with `verified=False`
+        — a number the report still prints, but one the DSR check refuses to
+        pass on. Falling back silently to the sweep size is what made the
+        deflation cosmetic in the first place.
+    """
+    if hypothesis is None:
+        print("trials: no --hypothesis given; DSR cannot pass on an unverified count")
+        return sweep_size, False
+
+    try:
+        identifier = uuid.UUID(hypothesis)
+    except ValueError:
+        print(f"trials: {hypothesis!r} is not a UUID; DSR cannot pass")
+        return sweep_size, False
+
+    with optional_connection() as connection:
+        if connection is None:
+            print("trials: database unreachable; DSR cannot pass on an unverified count")
+            return sweep_size, False
+        try:
+            prior = ExperimentRepository(connection).trials_for(identifier)
+        except UnregisteredHypothesisError:
+            print(f"trials: hypothesis {identifier} is not registered; DSR cannot pass")
+            return sweep_size, False
+
+    total = prior + sweep_size
+    print(f"trials: {prior} recorded + {sweep_size} in this sweep = {total} (verified)")
+    return total, True
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -63,6 +115,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--skip", type=int, default=5)
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--hypothesis",
+        default=None,
+        help=(
+            "UUID of the pre-registered hypothesis under test. Its recorded "
+            "trial count feeds the Deflated Sharpe Ratio; without it the DSR "
+            "check reports its number but cannot pass."
+        ),
+    )
     parser.add_argument(
         "--sessions",
         type=int,
@@ -189,9 +250,12 @@ def assemble_inputs(
     regimes = regime_slices(baseline, market["market_return"].to_numpy())
     print(f"regimes found: {', '.join(sorted(regimes)) if regimes else 'none — sample too short'}")
 
+    n_trials, trials_verified = resolve_trials(args.hypothesis, len(sweep))
+
     inputs = GauntletInputs(
         returns=baseline,
-        n_trials=len(sweep),  # honest count: this is what the sweep tested
+        n_trials=n_trials,
+        trials_verified=trials_verified,
         seed=SEED,
         shuffled_future_returns=shuffled,
         sweep_returns=sweep_matrix,
@@ -206,6 +270,50 @@ def assemble_inputs(
         periods_per_year=NSE_SESSIONS,
     )
     return inputs, neighbourhood, labels
+
+
+def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: GauntletReport) -> None:
+    """Persist this run so the trial counter it reads next time includes it.
+
+    **Without this the counter can never grow.** `record_run` existed, was
+    tested, and had no callers, so `hypotheses.n_trials` stayed wherever it
+    happened to be while every gauntlet pass deflated against a number that
+    never moved. Reading the counter honestly and never writing to it is only
+    half a fix — the count would be verified and permanently wrong.
+
+    Recorded after the verdict, not before: the gauntlet's own results are part
+    of the row, and a run that crashed mid-gauntlet should not be counted as a
+    trial that produced an answer.
+    """
+    if args.hypothesis is None:
+        return
+
+    with optional_connection() as connection:
+        if connection is None:
+            print("run not recorded: database unreachable; the trial count will understate")
+            return
+        try:
+            repository = ExperimentRepository(connection)
+            hypothesis = repository.hypothesis(uuid.UUID(args.hypothesis))
+        except (ValueError, UnregisteredHypothesisError) as exc:
+            print(f"run not recorded: {exc}")
+            return
+
+        record = record_run(
+            connection,
+            RunInputs(
+                hypothesis=hypothesis,
+                strategy_name="xs_momentum",
+                parameters={"lookback": args.lookback, "skip": args.skip, "top": args.top},
+                universe=[str(i) for i in panel.universe],
+                history=panel.history,
+                storage_uri=str(args.lake or settings.lake),
+                seed=SEED,
+                cost_model="NSE_EQUITY_DELIVERY",
+            ),
+            gauntlet=report,
+        )
+    print(f"recorded: experiment {record.experiment_id}, trial count now {record.trials}")
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -239,7 +347,9 @@ def run(argv: list[str] | None = None) -> int:
         return 1
 
     print()
-    print(run_gauntlet(inputs, short_circuit=False).format())
+    report = run_gauntlet(inputs, short_circuit=False)
+    print(report.format())
+    record_gauntlet_run(args, panel, report)
     # Test 12 stays SKIP by design. The locked test set is touched once per
     # strategy, ever (§5.3) — running it here would burn the only untouched
     # evidence on a routine validation pass.

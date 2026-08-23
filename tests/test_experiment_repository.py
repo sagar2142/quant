@@ -105,6 +105,31 @@ class TestHypotheses:
         with pytest.raises(UnregisteredHypothesisError, match="Pre-registration"):
             repo.trials_for(uuid.uuid4())
 
+    def test_a_hypothesis_round_trips(self, repo):
+        """The counterpart to `ensure_hypothesis`. A caller recording a run
+        against pre-registered research holds only the id; rebuilding the rest
+        by hand would let the recorded statement drift from the registered
+        one, which is what pre-registration exists to prevent."""
+        original = make_hypothesis()
+        hid = repo.register_hypothesis(original)
+        loaded = repo.hypothesis(hid)
+        assert loaded.hypothesis_id == hid
+        assert loaded.statement == original.statement
+        assert loaded.economic_mechanism == original.economic_mechanism
+        assert loaded.prediction == original.prediction
+
+    def test_the_split_dates_survive_the_round_trip(self, repo):
+        """The three windows are the §5.3 contract; a shifted boundary would
+        silently move the locked test set."""
+        original = make_hypothesis()
+        loaded = repo.hypothesis(repo.register_hypothesis(original))
+        assert loaded.dev_start == original.dev_start
+        assert loaded.test_end == original.test_end
+
+    def test_loading_an_unregistered_hypothesis_is_named(self, repo):
+        with pytest.raises(UnregisteredHypothesisError):
+            repo.hypothesis(uuid.uuid4())
+
     def test_thin_mechanism_never_reaches_the_database(self):
         """The CHECK constraint is the enforcement; this is the fast feedback."""
         with pytest.raises(ValueError, match="economic_mechanism"):

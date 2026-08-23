@@ -104,6 +104,19 @@ class GauntletInputs:
     n_trials: int
     seed: int
 
+    #: Whether `n_trials` is the durable count the database maintains, or a
+    #: local guess.
+    #:
+    #: **The DSR cannot pass on a guess.** Under-counting trials is the one
+    #: input to the gauntlet that moves a strategy only ever toward accept: at
+    #: 16 trials a 2.0-Sharpe candidate scores 0.951 and passes, and at the 500
+    #: a few months of real searching produce it scores 0.659 and fails. The
+    #: count therefore has to come from `ExperimentRepository.trials_for`,
+    #: which a database trigger maintains so no code path can forget to
+    #: increment it. When it is unavailable the check still runs and reports
+    #: its number — it simply may not be recorded as passed.
+    trials_verified: bool = False
+
     #: Data-quality findings from the ingest that produced these returns.
     critical_data_findings: int = 0
 
