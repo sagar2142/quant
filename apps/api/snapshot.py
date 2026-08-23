@@ -23,7 +23,7 @@ value at rest, and claiming one would be inventing it.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -76,6 +76,8 @@ class BookSnapshot:
     cycles: int = 0
     halted: bool = False
     halt_reason: str = ""
+    #: Structured reconciliation breaks from the last cycle.
+    breaks: list[dict[str, str]] = field(default_factory=list)
 
 
 def _exposures(
@@ -179,4 +181,5 @@ def book_snapshot(
         cycles=state.cycles,
         halted=state.halted,
         halt_reason=state.halt_reason,
+        breaks=state.breaks,
     )

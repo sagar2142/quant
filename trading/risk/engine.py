@@ -53,8 +53,19 @@ class RiskCheck:
     observed: Decimal | None = None
     threshold: Decimal | None = None
     message: str = ""
+    #: Whether the limit was actually evaluated against a number.
+    #:
+    #: A check can allow an order without having measured anything — the
+    #: liquidity limit deliberately lets a fresh listing through, because
+    #: blocking every instrument with no ADV history would be wrong. But
+    #: reporting that as "ok" is the failure this console has been chasing all
+    #: along: it renders identically to a limit that was checked and cleared,
+    #: so nobody can tell protection from its absence.
+    measured: bool = True
 
     def format(self) -> str:
+        if not self.measured:
+            return f"    [ --  ] {self.name:<24} {self.message}"
         mark = "ok  " if self.passed else "FAIL"
         if self.observed is None:
             return f"    [{mark}] {self.name:<24} {self.message}"
@@ -263,8 +274,18 @@ class RiskEngine:
         """
         adv = state.adv.get(order.instrument_id)
         if adv is None or adv <= 0:
+            # Allowed, but not measured, and the two are reported differently.
+            # The order still passes: a fresh listing has no ADV history and
+            # refusing every such instrument would be a worse rule than this
+            # one. What changes is that the check no longer claims to have
+            # verified something it never looked at. `max_order_notional` is
+            # what actually bounds this order.
             return RiskCheck(
-                "liquidity", passed=True, message="ADV unknown; participation not checked"
+                "liquidity",
+                passed=True,
+                measured=False,
+                threshold=self.limits.max_adv_participation,
+                message="ADV unknown; participation not checked, size bounded by order notional",
             )
         participation = order.notional / adv
         return RiskCheck(

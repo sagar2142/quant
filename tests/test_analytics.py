@@ -366,3 +366,71 @@ class TestDuplicateSymbols:
         frame = self.panel(["AAA", "BBB"])
         kept, _ = aligned_returns(frame, ["BBB", "AAA", "BBB"])
         assert kept == ["BBB", "AAA"]
+
+
+class TestPanelCacheTracksTheLake:
+    """The cache is keyed on the lake's contents, not on process lifetime.
+
+    It previously cached unconditionally and documented a restart as the way to
+    pick up new sessions. The staleness the console showed was honest — it was
+    the true age of the panel being served — but a system that ingests daily
+    needed restarting after every daily ingest to see the day it had fetched.
+    """
+
+    def test_the_fingerprint_counts_sessions_and_names_the_newest(self, tmp_path):
+        from datetime import date, datetime
+        from unittest.mock import patch
+
+        import polars as pl
+
+        from core.clock import UTC
+
+        panel_dir = tmp_path / "panel" / "NSE" / "2026"
+        panel_dir.mkdir(parents=True)
+        for day in (20, 21):
+            frame = pl.DataFrame(
+                {
+                    "event_time": [datetime(2026, 8, day, tzinfo=UTC)],
+                    "receive_time": [datetime(2026, 8, day, 12, tzinfo=UTC)],
+                    "instrument_id": ["NSE:INE000000000"],
+                    "symbol": ["AAA"],
+                    "open": [1.0],
+                    "high": [1.0],
+                    "low": [1.0],
+                    "close": [1.0],
+                    "volume": [1.0],
+                    "trades": [1],
+                },
+                schema_overrides={
+                    "event_time": pl.Datetime("us", "UTC"),
+                    "receive_time": pl.Datetime("us", "UTC"),
+                },
+            )
+            frame.write_parquet(panel_dir / f"{date(2026, 8, day).isoformat()}.parquet")
+
+        with patch("apps.api.analytics.settings") as fake:
+            fake.lake = tmp_path
+            from apps.api.analytics import _lake_fingerprint
+
+            assert _lake_fingerprint() == (2, "2026-08-21")
+
+    def test_an_unreadable_lake_fingerprints_as_empty(self, tmp_path):
+        from unittest.mock import patch
+
+        with patch("apps.api.analytics.settings") as fake:
+            fake.lake = tmp_path / "does-not-exist"
+            from apps.api.analytics import _lake_fingerprint
+
+            assert _lake_fingerprint() == (0, "")
+
+    def test_an_unchanged_lake_is_served_from_cache(self):
+        """The reason the cache exists: 3.3M rows on every screen."""
+        from apps.api.analytics import _panel, _read_panel
+
+        try:
+            _panel()
+        except Exception:  # noqa: BLE001 - no lake on a CI runner
+            pytest.skip("no lake available")
+        before = _read_panel.cache_info().misses
+        _panel()
+        assert _read_panel.cache_info().misses == before

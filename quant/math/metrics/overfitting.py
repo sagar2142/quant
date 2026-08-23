@@ -57,6 +57,11 @@ PBO_FAIL = 0.5
 
 #: Minimum observations before DSR is meaningful.
 MIN_OBS_DSR = 4
+
+#: Fewest trials that can have produced a selected candidate. One means
+#: the idea was tested once and kept; zero means it was never tested, which
+#: is not a number the deflation can use.
+MIN_TRIALS = 1
 #: A choice needs at least two options, and a split needs at least two blocks.
 MIN_CONFIGURATIONS = 2
 MIN_BLOCKS_PER_SPLIT = 2
@@ -141,6 +146,18 @@ def deflated_sharpe_ratio(
     Returns:
         A `DsrResult` whose `dsr` is a probability in [0, 1].
     """
+    # A trial count below one is not a conservative input, it is a broken one:
+    # zero and negative both silently produced the single-trial answer, which
+    # is the most flattering deflation available. The count comes from a
+    # database counter that cannot go below one, so a value here that did means
+    # the caller computed it rather than read it — exactly the mistake this
+    # argument exists to prevent.
+    if n_trials < MIN_TRIALS:
+        raise ValueError(
+            f"n_trials must be at least {MIN_TRIALS}, got {n_trials}. "
+            "A candidate that was never tried cannot have been selected."
+        )
+
     rets = np.asarray(returns, dtype=np.float64).ravel()
     rets = rets[np.isfinite(rets)]
     observations = rets.size

@@ -832,3 +832,16 @@ tbody tr:hover {
 }
 
 .tut-on { border-color: var(--accent); color: var(--text-primary); }
+
+
+/* A column with a definition gets a dotted underline — the long-standing
+   convention for "there is more here", and the only affordance that works
+   before the pointer arrives. Inherits the header's colour and weight so the
+   row still reads as a header rather than as links. */
+.th-defined {
+  text-decoration: underline dotted var(--text-secondary);
+  text-underline-offset: 3px;
+  cursor: help;
+  color: inherit;
+  font: inherit;
+}

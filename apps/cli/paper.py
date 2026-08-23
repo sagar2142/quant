@@ -39,6 +39,7 @@ from engine.accounting import Portfolio
 from engine.costs.india import NseEquityCostModel
 from ops.alerts import AlertRouter
 from ops.routing import build_router, describe_channels
+from quant.analytics.clusters import assign_clusters
 from quant.strategies.base import MarketView, Strategy
 from quant.strategies.baselines import CrossSectionalMomentum
 from trading.execution.broker import BrokerPosition, PaperBroker
@@ -224,6 +225,11 @@ def run_cycle_for(
             weights=weights.weights,
             marks={k: v for k, v in marks.items() if k in instruments},
             adv=trailing_adv(history),
+            # Correlation groups over the traded universe. `max_cluster_pct`
+            # has been configured and enforced since the risk engine was
+            # written, and was skipped on every order ever placed because
+            # nothing supplied a cluster to check.
+            clusters=assign_clusters(history, tuple(instruments)),
         ),
         # Broker is rebuilt fresh each run, so its fill log starts empty and
         # the persisted marker must not be applied to it.
@@ -248,6 +254,19 @@ def persist_outcome(
     state.last_cycle_at = utc_now()
     state.last_session = report.session
     state.fill_marker = report.fill_marker
+    if report.reconciliation is not None:
+        # Kept whether or not they halted: a non-critical break is still a
+        # disagreement worth seeing, and only critical ones stop trading.
+        state.breaks = [
+            {
+                "instrument_id": str(b.instrument_id),
+                "kind": b.kind.value,
+                "field_name": b.field_name,
+                "internal": str(b.internal),
+                "broker": str(b.broker),
+            }
+            for b in report.reconciliation.breaks
+        ]
     if report.should_halt and report.reconciliation is not None:
         state.engage_halt(
             f"reconciliation breaks on {report.session}: "

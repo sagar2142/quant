@@ -236,7 +236,7 @@ def create_app(
                     name="nse",
                     health=_health(lake_age, LAKE_WARN_SECONDS, LAKE_CRITICAL_SECONDS),
                 ),
-                FeedStatus(name="paper", health=_cycle_health(snapshot.staleness_seconds)),
+                FeedStatus(name="cycle", health=_cycle_health(snapshot.staleness_seconds)),
             ],
             # The worst of the two. One number on the bar must not be able to
             # hide the other feed's problem behind the healthier one.

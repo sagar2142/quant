@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Th } from "./Th";
 import { formatPercent, formatRatio, signClass } from "../format";
 
 export interface ScreenRow {
@@ -171,15 +172,15 @@ export function Screener({
               <table className="grid">
                 <thead>
                   <tr>
-                    <th>symbol</th>
-                    <th className="right">ADV Cr</th>
-                    <th className="right">return</th>
-                    <th className="right">vol</th>
-                    <th className="right">sharpe</th>
-                    <th className="right">maxDD</th>
-                    <th className="right">hurst</th>
-                    <th>process</th>
-                    <th>flags</th>
+                    <Th>symbol</Th>
+                    <Th className="right">ADV Cr</Th>
+                    <Th className="right">return</Th>
+                    <Th className="right">vol</Th>
+                    <Th className="right">sharpe</Th>
+                    <Th className="right">maxDD</Th>
+                    <Th className="right">hurst</Th>
+                    <Th>process</Th>
+                    <Th>flags</Th>
                   </tr>
                 </thead>
                 <tbody>

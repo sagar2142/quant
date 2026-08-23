@@ -109,6 +109,12 @@ function Console() {
             .reverse(),
           // Absent means the endpoint is unreachable, which is not the same as
           // a clean reconciliation — so `checked` stays false.
+          breaks: ((recon?.breaks ?? []) as Record<string, string>[]).map((b) => ({
+            instrumentId: String(b.instrument_id),
+            kind: String(b.kind),
+            internal: Number(b.internal),
+            broker: Number(b.broker),
+          })),
           reconciliation: {
             checked: Boolean(recon?.checked),
             halted: Boolean(recon?.halted),
@@ -123,7 +129,7 @@ function Console() {
             lastPrice: Number(p.last_price),
             unrealisedPnl: Number(p.unrealised_pnl),
             weightPct: Number(p.weight_pct),
-            cluster: "",
+            cluster: String(p.cluster ?? ""),
           })),
           // Read from the API, never invented. These two fields were once
           // hardcoded to `0` and `true`, so the Risk screen reported every

@@ -245,7 +245,7 @@ class TestVitalsReadRealState:
         # `staleness_seconds` is the worse of the lake and the cycle, so an
         # absent book does not make it null — the lake still has an age. The
         # paper feed is where "never ran" shows.
-        assert _feed(client, "paper")["health"] == "down"
+        assert _feed(client, "cycle")["health"] == "down"
 
     def test_a_book_that_never_ran_is_not_healthy(self, harness, monkeypatch, tmp_path):
         """Green on an unstarted system is the same lie as a zero drawdown on
@@ -253,28 +253,28 @@ class TestVitalsReadRealState:
         client, _, _ = harness
         monkeypatch.setattr("apps.api.main.DEFAULT_STATE_DIR", tmp_path / "nothing")
         monkeypatch.setattr("apps.api.book.DEFAULT_STATE_DIR", tmp_path / "nothing")
-        assert _feed(client, "paper")["health"] == "down"
+        assert _feed(client, "cycle")["health"] == "down"
 
     def test_a_stale_cycle_degrades_the_feed(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(hours=48))
-        assert _feed(client, "paper")["health"] == "degraded"
+        assert _feed(client, "cycle")["health"] == "degraded"
 
     def test_a_very_stale_cycle_marks_the_feed_down(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(days=7))
-        assert _feed(client, "paper")["health"] == "down"
+        assert _feed(client, "cycle")["health"] == "down"
 
     def test_a_fresh_cycle_is_healthy(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(minutes=5))
-        assert _feed(client, "paper")["health"] == "ok"
+        assert _feed(client, "cycle")["health"] == "ok"
 
     def test_the_daily_cycle_is_not_judged_on_the_tick_feed_thresholds(self):
         """§12.7's 2s/10s describe a live tick feed. A once-a-session batch
@@ -366,7 +366,7 @@ class TestBothFeedsAreReported:
     def test_the_lake_and_the_cycle_are_separate_feeds(self, harness):
         client, _, _ = harness
         names = {f["name"] for f in client.get("/vitals").json()["feeds"]}
-        assert names == {"nse", "paper"}
+        assert names == {"nse", "cycle"}
 
     def test_headline_staleness_is_the_worse_of_the_two(self):
         from apps.api.main import _worst

@@ -24,7 +24,7 @@ the log is what the M9 drift analysis reads.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -73,6 +73,13 @@ class PaperState:
     #: purpose: a halt that a re-run resets is not a halt (§9).
     halted: bool = False
     halt_reason: str = ""
+    #: The last cycle's reconciliation breaks, one dict per row.
+    #:
+    #: `halt_reason` is the same information as prose, which is enough to page
+    #: a human and not enough to show them a table. The structured rows were
+    #: produced every cycle and discarded, so the console's Reconcile screen had
+    #: nothing to render and said the records agreed.
+    breaks: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.last_cycle_at is not None:
@@ -87,6 +94,9 @@ class PaperState:
     def clear_halt(self) -> None:
         self.halted = False
         self.halt_reason = ""
+        # The rows go with the halt they explained. Leaving them would show a
+        # cleared account alongside the breaks that halted it.
+        self.breaks = []
 
 
 @dataclass
@@ -247,6 +257,7 @@ def _encode_state(state: PaperState) -> dict[str, object]:
         "last_session": state.last_session.isoformat() if state.last_session else None,
         "halted": state.halted,
         "halt_reason": state.halt_reason,
+        "breaks": state.breaks,
     }
 
 
@@ -301,4 +312,5 @@ def _decode_state(raw: dict[str, object]) -> PaperState:
         ),
         halted=bool(raw.get("halted", False)),
         halt_reason=str(raw.get("halt_reason", "")),
+        breaks=_entries(raw, "breaks"),  # type: ignore[arg-type]
     )

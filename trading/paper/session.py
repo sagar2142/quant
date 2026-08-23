@@ -71,6 +71,12 @@ class CycleInputs:
     marks: dict[InstrumentId, Decimal]
     #: Trailing average daily traded value, for the liquidity limit.
     adv: dict[InstrumentId, Decimal] = field(default_factory=dict)
+    #: Correlation group per instrument, for the concentration limit (§8).
+    #:
+    #: Empty leaves every order unclustered, which is what happened on every
+    #: cycle before this existed: `max_cluster_pct` was configured, enforced and
+    #: never once evaluated, because nothing ever set a cluster to check.
+    clusters: dict[InstrumentId, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,27 @@ class CycleReport:
         if self.should_halt:
             lines.append("  ** HALT: unexplained break — no further cycles until cleared **")
         return "\n".join(lines)
+
+
+
+def _cluster_exposure(
+    notionals: dict[InstrumentId, Decimal], clusters: dict[InstrumentId, str]
+) -> dict[str, Decimal]:
+    """Exposure per correlation group, from the same notionals the position
+    limit reads.
+
+    Derived rather than tracked separately: a second running total of the same
+    book is a second thing to drift, and the concentration limit disagreeing
+    with the position limit about what is held would be worse than having
+    neither.
+    """
+    exposure: dict[str, Decimal] = {}
+    for instrument_id, notional in notionals.items():
+        group = clusters.get(instrument_id)
+        if not group:
+            continue
+        exposure[group] = exposure.get(group, Decimal(0)) + notional
+    return exposure
 
 
 class PaperSession:
@@ -196,7 +223,8 @@ class PaperSession:
         for instrument_id, delta in deltas:
             price = inputs.marks[instrument_id]
             state = self._risk_state(portfolio, inputs, opening_equity, peak, in_flight)
-            verdict = self.risk.check(self._proposed(instrument_id, delta, price), state)
+            proposed = self._proposed(instrument_id, delta, price, inputs.clusters)
+            verdict = self.risk.check(proposed, state)
             if not verdict.allowed:
                 report.blocked.append(BlockedOrder(instrument_id, delta, verdict))
                 continue
@@ -213,7 +241,11 @@ class PaperSession:
     # ── steps ───────────────────────────────────────────────────────────────
 
     def _proposed(
-        self, instrument_id: InstrumentId, delta: Decimal, price: Decimal
+        self,
+        instrument_id: InstrumentId,
+        delta: Decimal,
+        price: Decimal,
+        clusters: dict[InstrumentId, str],
     ) -> ProposedOrder:
         instrument = self.instruments[instrument_id]
         return ProposedOrder(
@@ -222,6 +254,7 @@ class PaperSession:
             quantity=delta,
             price=price,
             multiplier=instrument.multiplier,
+            cluster=clusters.get(instrument_id, ""),
         )
 
     def _risk_state(
@@ -250,6 +283,9 @@ class PaperSession:
             peak_equity=peak,
             day_start_equity=opening_equity,
             positions=notionals,
+            # Exposure per correlation group, summed from the same notionals the
+            # position limit sees, so the two cannot disagree about the book.
+            clusters=_cluster_exposure(notionals, inputs.clusters),
             open_orders=0,  # paper fills instantly; nothing rests at the venue
             orders_this_minute=len(in_flight),
             last_prices=inputs.marks,

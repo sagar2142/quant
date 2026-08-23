@@ -31,6 +31,7 @@ from apps.api.auth import ReadAccess
 from apps.api.limits import LimitRow, limit_rows
 from apps.api.snapshot import book_snapshot
 from core.instruments import InstrumentId
+from data.feeds.quotes import fetch_quotes
 from trading.paper.state import PaperStateStore, StateCorruptError
 from trading.risk.limits import RiskLimits
 
@@ -56,6 +57,9 @@ class ReconciliationResponse(BaseModel):
     halted: bool
     halt_reason: str
     cycles: int
+    #: One row per disagreement found by the last cycle. Empty after a clean
+    #: reconciliation *and* before any has run — `checked` separates those.
+    breaks: list[dict[str, str]] = []
 
 
 class PositionRow(BaseModel):
@@ -67,6 +71,10 @@ class PositionRow(BaseModel):
     market_value: float
     unrealised_pnl: float
     weight_pct: float
+    #: Correlation group, or empty when the name could not be grouped. Empty is
+    #: "not measured", not "in no group": the concentration limit is unchecked
+    #: for that position rather than cleared.
+    cluster: str = ""
 
 
 class BookResponse(BaseModel):
@@ -144,6 +152,8 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
 
         marks = _latest_marks(marks_source)
         symbols = _symbol_map(marks_source)
+        held = tuple(i for i, p in state.portfolio.positions.items() if not p.is_flat)
+        clusters = _clusters_for(marks_source, held)
         rows: list[PositionRow] = []
         position_value = Decimal(0)
 
@@ -163,6 +173,7 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
                     market_value=float(value),
                     unrealised_pnl=float(position.unrealised_pnl(last)),
                     weight_pct=0.0,
+                    cluster=clusters.get(instrument_id, ""),
                 )
             )
 
@@ -190,6 +201,25 @@ def build_book_router(marks_source: object | None = None) -> APIRouter:
     _register_logs(router, marks_source)
 
     return router
+
+
+def _clusters_for(source: object | None, held: tuple[InstrumentId, ...]) -> dict[InstrumentId, str]:
+    """Correlation groups over the names currently held.
+
+    Computed for the book rather than the whole panel: the concentration limit
+    is about what you are holding, and clustering three thousand names to label
+    nine of them would cost seconds per request for no extra information.
+    """
+    if not held:
+        return {}
+    from apps.api.analytics import _panel  # noqa: PLC0415 - shares the cached panel
+    from quant.analytics.clusters import assign_clusters  # noqa: PLC0415
+
+    try:
+        history = source if isinstance(source, pl.DataFrame) else _panel()
+        return assign_clusters(history, held)
+    except Exception:  # noqa: BLE001 - a monitoring surface must not 500 on data
+        return {}
 
 
 def _symbol_map(source: object | None) -> dict[InstrumentId, str]:
@@ -281,6 +311,38 @@ def _register_logs(router: APIRouter, marks_source: object | None) -> None:
         """One row per completed cycle. This is the M9 six-week clock (§M9)."""
         return PaperStateStore(DEFAULT_STATE_DIR).equity_history()
 
+    @router.get("/quotes", dependencies=[ReadAccess])
+    def quotes(symbols: str = "") -> dict[str, object]:
+        """Delayed last-traded prices for display only.
+
+        **Never mixed into the panel.** Everything in `quant/` and `engine/`
+        reads rows carrying a `receive_time`, so a decision can only see what
+        had arrived by then. A quote fetched now has no such history, and
+        joining it to the panel would destroy the point-in-time discipline the
+        research rests on (§3). This exists so an operator watching a position
+        mid-session is not reading last night's close without knowing it.
+
+        Every quote carries the age of the price itself, from the vendor's own
+        timestamp. A delayed quote presented as live is worse than no quote.
+        """
+        wanted = tuple(s for s in (symbols or "").split(",") if s.strip())
+        if not wanted:
+            return {"quotes": {}, "failures": {}, "stalest_seconds": None}
+
+        result = fetch_quotes(wanted)
+        return {
+            "quotes": {
+                symbol: {
+                    "price": float(quote.price),
+                    "quoted_at": quote.quoted_at.isoformat(),
+                    "age_seconds": quote.age_seconds,
+                }
+                for symbol, quote in result.quotes.items()
+            },
+            "failures": result.failures,
+            "stalest_seconds": result.stalest_seconds,
+        }
+
     @router.get("/fills", dependencies=[ReadAccess])
     def fills(limit: int = FILL_PAGE) -> list[dict[str, str]]:
         """Applied fills, most recent last — the Blotter's source.
@@ -312,4 +374,5 @@ def _register_logs(router: APIRouter, marks_source: object | None) -> None:
             halted=snapshot.halted,
             halt_reason=snapshot.halt_reason,
             cycles=snapshot.cycles,
+            breaks=snapshot.breaks,
         )

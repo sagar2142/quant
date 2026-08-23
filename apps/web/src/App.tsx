@@ -18,6 +18,7 @@ import { Tutorial } from "./components/Tutorial";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import { PriceChart } from "./components/Sparkline";
+import { Th } from "./components/Th";
 import {
   directionGlyph,
   formatCount,
@@ -153,13 +154,13 @@ function PositionsTable({ positions }: { positions: Position[] }) {
     <table>
       <thead>
         <tr>
-          <th>Symbol</th>
-          <th className="num">Qty</th>
-          <th className="num">Avg</th>
-          <th className="num">Last</th>
-          <th className="num">Unrealised</th>
-          <th className="num">% NAV</th>
-          <th>Cluster</th>
+          <Th>Symbol</Th>
+          <Th className="num">Qty</Th>
+          <Th className="num">Avg</Th>
+          <Th className="num">Last</Th>
+          <Th className="num">Unrealised</Th>
+          <Th className="num">% NAV</Th>
+          <Th>Cluster</Th>
         </tr>
       </thead>
       <tbody>
@@ -191,13 +192,13 @@ function Blotter({ trades }: { trades: Trade[] }) {
     <table>
       <thead>
         <tr>
-          <th>Time</th>
-          <th>Symbol</th>
-          <th>Side</th>
-          <th className="num">Qty</th>
-          <th className="num">Price</th>
-          <th className="num">Costs</th>
-          <th>State</th>
+          <Th>Time</Th>
+          <Th>Symbol</Th>
+          <Th>Side</Th>
+          <Th className="num">Qty</Th>
+          <Th className="num">Price</Th>
+          <Th className="num">Costs</Th>
+          <Th>State</Th>
         </tr>
       </thead>
       <tbody>
@@ -227,10 +228,10 @@ function RiskTable({ rows }: { rows: RiskRow[] }) {
     <table>
       <thead>
         <tr>
-          <th>Limit</th>
-          <th className="num">Observed</th>
-          <th className="num">Threshold</th>
-          <th className="num">Used</th>
+          <Th>Limit</Th>
+          <Th className="num">Observed</Th>
+          <Th className="num">Threshold</Th>
+          <Th className="num">Used</Th>
         </tr>
       </thead>
       <tbody>
@@ -303,11 +304,11 @@ function Reconciliation({
       <table>
         <thead>
           <tr>
-            <th>Instrument</th>
-            <th>Kind</th>
-            <th className="num">Internal</th>
-            <th className="num">Broker</th>
-            <th className="num">Diff</th>
+            <Th>Instrument</Th>
+            <Th>Kind</Th>
+            <Th className="num">Internal</Th>
+            <Th className="num">Broker</Th>
+            <Th className="num">Diff</Th>
           </tr>
         </thead>
         <tbody>

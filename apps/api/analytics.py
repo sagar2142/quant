@@ -61,15 +61,43 @@ LIQUIDITY_WINDOW = 60
 
 
 @lru_cache(maxsize=1)
-def _panel() -> pl.DataFrame:
-    """The whole panel, read once.
+def _read_panel(fingerprint: tuple[int, str]) -> pl.DataFrame:
+    """Read the whole panel. Keyed on the lake's own state, never called bare.
 
-    Cached because it is immutable between ingests and large enough that a
-    per-request read would be felt on every screen. A restart picks up new
-    sessions, which is the right granularity for a daily-frequency system.
+    The argument is not used for anything except cache identity: a different
+    fingerprint is a different lake, so `lru_cache` evicts and re-reads.
     """
+    del fingerprint
     store = PanelStore(settings.lake, venue="NSE")
     return store.view(as_of=as_decision_time(utc_now()))
+
+
+def _lake_fingerprint() -> tuple[int, str]:
+    """How many sessions the panel holds and the newest one, as a cache key.
+
+    `sessions()` is a filename glob and touches no file contents, so this costs
+    a directory walk rather than a parquet read. Cheap enough to check on every
+    request, which is what lets an ingest be picked up without a restart.
+    """
+    try:
+        sessions = PanelStore(settings.lake, venue="NSE").sessions()
+    except OSError:
+        return (0, "")
+    return (len(sessions), sessions[-1].isoformat() if sessions else "")
+
+
+def _panel() -> pl.DataFrame:
+    """The whole panel, re-read only when the lake has actually changed.
+
+    Cached because it is large enough that a per-request read would be felt on
+    every screen, and keyed on the lake's contents rather than on nothing. The
+    previous version cached unconditionally and documented a restart as the way
+    to pick up new sessions. That was honest — the staleness the console showed
+    was the true age of the panel being served, red light and all — but it made
+    a daily-ingest system need a restart after every daily ingest to see the
+    day it had just fetched.
+    """
+    return _read_panel(_lake_fingerprint())
 
 
 def _not_found(history: pl.DataFrame, name: str) -> str:

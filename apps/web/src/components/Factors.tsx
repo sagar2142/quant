@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Th } from "./Th";
 import { formatPercent, formatRatio, signClass } from "../format";
 
 export interface HorizonRow {
@@ -193,12 +194,12 @@ export function Factors({ apiBase = "/api" }: { apiBase?: string }) {
             <table className="grid">
               <thead>
                 <tr>
-                  <th>horizon</th>
-                  <th className="right">IC</th>
-                  <th className="right">IR</th>
-                  <th className="right">t</th>
-                  <th className="right">hit</th>
-                  <th className="right">sessions</th>
+                  <Th>horizon</Th>
+                  <Th className="right">IC</Th>
+                  <Th className="right">IR</Th>
+                  <Th className="right">t</Th>
+                  <Th className="right">hit</Th>
+                  <Th className="right">sessions</Th>
                 </tr>
               </thead>
               <tbody>

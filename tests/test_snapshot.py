@@ -341,3 +341,138 @@ class TestFillLog:
         rewriting history to append either."""
         store = PaperStateStore(tmp_path)
         assert store.fills_path != store.log_path
+
+
+class TestUnmeasuredIsNotPassed:
+    """A limit that allowed an order without evaluating one is reported as
+    unmeasured, not as cleared. The liquidity check deliberately lets a fresh
+    listing through — blocking every instrument with no ADV history would be a
+    worse rule — but rendering that as "ok" makes protection and its absence
+    look identical.
+    """
+
+    def order(self, **kw):
+        from trading.risk.limits import ProposedOrder
+
+        base = {
+            "strategy_id": "s",
+            "instrument_id": RELIANCE,
+            "quantity": Decimal(10),
+            "price": Decimal(100),
+        }
+        return ProposedOrder(**{**base, **kw})
+
+    def state(self, **kw):
+        from trading.risk.limits import PortfolioState
+
+        base = {
+            "equity": Decimal(1_000_000),
+            "cash": Decimal(1_000_000),
+            "peak_equity": Decimal(1_000_000),
+            "day_start_equity": Decimal(1_000_000),
+            "positions": {},
+            "clusters": {},
+            "open_orders": 0,
+            "orders_this_minute": 0,
+            "last_prices": {RELIANCE: Decimal(100)},
+            "adv": {RELIANCE: Decimal(10**9)},
+        }
+        return PortfolioState(**{**base, **kw})
+
+    def liquidity(self, state):
+        from trading.risk.engine import RiskEngine
+
+        verdict = RiskEngine().check(self.order(), state)
+        return verdict, next(c for c in verdict.checks if c.name == "liquidity")
+
+    def test_unknown_adv_is_allowed_but_not_measured(self):
+        verdict, check = self.liquidity(self.state(adv={}))
+        assert verdict.allowed
+        assert check.passed
+        assert check.measured is False
+
+    def test_a_known_adv_is_measured(self):
+        _, check = self.liquidity(self.state())
+        assert check.measured is True
+        assert check.observed is not None
+
+    def test_an_unmeasured_check_does_not_render_as_ok(self):
+        _, check = self.liquidity(self.state(adv={}))
+        assert "ok" not in check.format()
+
+    def test_checks_are_measured_by_default(self):
+        """A check that says nothing about provenance claims to have measured."""
+        from trading.risk.engine import RiskCheck
+
+        assert RiskCheck("x", passed=True).measured is True
+
+
+class TestTrialCountFloor:
+    def test_zero_trials_is_refused(self):
+        import numpy as np
+
+        from quant.math.metrics.overfitting import deflated_sharpe_ratio
+
+        with pytest.raises(ValueError, match="at least"):
+            deflated_sharpe_ratio(np.random.default_rng(0).normal(0, 0.01, 100), n_trials=0)
+
+    def test_negative_trials_is_refused(self):
+        import numpy as np
+
+        from quant.math.metrics.overfitting import deflated_sharpe_ratio
+
+        with pytest.raises(ValueError, match="at least"):
+            deflated_sharpe_ratio(np.random.default_rng(0).normal(0, 0.01, 100), n_trials=-5)
+
+    def test_one_trial_is_the_floor_and_is_allowed(self):
+        """An idea tested once and kept is a real, if minimal, search."""
+        import numpy as np
+
+        from quant.math.metrics.overfitting import MIN_TRIALS, deflated_sharpe_ratio
+
+        assert MIN_TRIALS == 1
+        result = deflated_sharpe_ratio(
+            np.random.default_rng(0).normal(0.001, 0.01, 500), n_trials=MIN_TRIALS
+        )
+        assert result.expected_max_sharpe == 0.0
+
+
+class TestBreaksSurvive:
+    def test_breaks_round_trip_through_the_state_file(self, tmp_path):
+        """`halt_reason` is the same information as prose — enough to page a
+        human, not enough to show them a table."""
+        rows = [
+            {
+                "instrument_id": str(RELIANCE),
+                "kind": "QUANTITY",
+                "field_name": "quantity",
+                "internal": "100",
+                "broker": "90",
+            }
+        ]
+        store = write_state(tmp_path)
+        state = store.restore()
+        state.breaks = rows
+        store.save(state)
+        assert PaperStateStore(tmp_path).restore().breaks == rows
+
+    def test_clearing_a_halt_clears_its_breaks(self, tmp_path):
+        """Rows go with the halt they explained; a cleared account showing the
+        breaks that halted it is a contradiction."""
+        store = write_state(tmp_path)
+        state = store.restore()
+        state.breaks = [{"instrument_id": str(RELIANCE), "kind": "PHANTOM"}]
+        state.engage_halt("broker disagrees")
+        state.clear_halt()
+        assert state.breaks == []
+
+    def test_the_snapshot_carries_them(self, tmp_path):
+        store = write_state(tmp_path)
+        state = store.restore()
+        state.breaks = [{"instrument_id": str(RELIANCE), "kind": "QUANTITY"}]
+        store.save(state)
+        assert book_snapshot(tmp_path).breaks[0]["kind"] == "QUANTITY"
+
+    def test_a_clean_cycle_has_no_breaks(self, tmp_path):
+        write_state(tmp_path)
+        assert book_snapshot(tmp_path).breaks == []
