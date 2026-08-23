@@ -1,0 +1,95 @@
+# Paper trading on GitHub Actions — MASTER_PLAN §0.4 (100% free resources), §M9.
+#
+# WHY THIS SHAPE. Daily-frequency NSE trading needs one cycle per session, not a
+# daemon (§20). A scheduled job that starts, trades once and exits fits inside
+# the free tier's compute model exactly, and a job that exits cannot wedge
+# overnight. Uptime is someone else's problem, which is the entire trade.
+#
+# INSTALL. This repo must live on GitHub (private is fine). Copy this file to:
+#     .github/workflows/paper.yml
+# and give Actions write permission (Settings -> Actions -> General ->
+# Workflow permissions -> Read and write), which the state-commit step needs.
+#
+# STATE. Runners are ephemeral, so durable state is committed back to the repo:
+# paper_state.json and paper_equity.ndjson are small text files, and their git
+# history IS the M9 audit trail — every cycle's book, timestamped and immutable.
+# The bar lake is NOT committed; it is cached, and on a cache miss the ingest
+# step refetches the recent window from NSE (resumable, so a miss costs
+# minutes, not the 2.5-hour full backfill).
+#
+# TIMEZONES. NSE closes 15:30 IST = 10:00 UTC; bhavcopy publishes ~2.5h later.
+# 13:30 UTC leaves an hour of slack. GitHub cron has no timezone support and
+# IST has no DST, so the UTC time is stable year-round.
+#
+# HALTS. Exit code 2 is a reconciliation halt (§9). The job fails loudly and
+# every later scheduled run keeps failing until a human re-runs with
+# --clear-halt. That nagging is the feature: a halt nobody notices is not a
+# halt. GitHub emails on workflow failure by default — that is the free
+# alerting layer until Telegram is wired.
+
+name: paper-cycle
+
+on:
+  schedule:
+    - cron: "30 13 * * 1-5"   # 19:00 IST, Mon-Fri; skips weekends, not holidays
+  workflow_dispatch:
+    inputs:
+      clear_halt:
+        description: "Acknowledge a reconciliation halt (human decision, §9)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: paper-account          # two cycles racing on one account is corruption
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Restore bar lake
+        uses: actions/cache@v4
+        with:
+          path: lake
+          # One key per month: the first run of a month rebuilds the recent
+          # window once; every later run restores and appends only new days.
+          key: nse-lake-${{ github.run_started_at }}
+          restore-keys: nse-lake-
+
+      - name: Ingest recent sessions
+        # 180 calendar days covers the 60-day universe window plus the 60-bar
+        # momentum lookback with margin. Already-present sessions are skipped,
+        # so against a warm cache this fetches only the new day.
+        run: |
+          python -m apps.cli.ingest_nse \
+            --start "$(date -u -d '180 days ago' +%F)" \
+            --pause 1.0
+
+      - name: Run paper cycle
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.clear_halt }}" = "true" ]; then FLAGS="--clear-halt"; fi
+          python -m apps.cli.paper --top 30 --state-dir paper $FLAGS
+
+      - name: Commit state
+        # Runs even when the cycle halted (exit 2 fails the job above only at
+        # the end): the halt itself must be persisted, or the next run would
+        # not know about it.
+        if: always()
+        run: |
+          git config user.name "paper-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add paper/
+          git diff --cached --quiet || git commit -m "paper cycle $(date -u +%F)"
+          git push
