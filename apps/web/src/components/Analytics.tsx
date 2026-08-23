@@ -15,7 +15,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { formatPercent, formatPrice, formatRatio, signClass } from "../format";
-import { DrawdownChart, PriceChart } from "./Sparkline";
+import {
+  AutocorrelationBars,
+  DrawdownChart,
+  PriceChart,
+  ReturnHistogram,
+  VolatilityChart,
+} from "./Sparkline";
 
 export interface Horizon {
   label: string;
@@ -158,6 +164,27 @@ function SecurityScreen({ data, closes }: { data: Security; closes: number[] }) 
           <div className="chart-wrap">
             <span className="chart-label">drawdown from peak</span>
             <DrawdownChart closes={closes} />
+          </div>
+          {/* The numbers below state skew, kurtosis, VaR and a volatility
+              regime. These draw the evidence for them: a kurtosis of 7.2 is
+              inert as a figure and obvious as a shaded left tail. */}
+          <div className="chart-wrap">
+            <span className="chart-label">
+              daily return distribution · 5% tail shaded, VaR dashed, CVaR solid
+            </span>
+            <ReturnHistogram closes={closes} var5={data.var5} cvar5={data.cvar5} />
+          </div>
+          <div className="chart-wrap">
+            <span className="chart-label">
+              rolling 21d volatility, annualised · dashed line is its own average
+            </span>
+            <VolatilityChart closes={closes} />
+          </div>
+          <div className="chart-wrap">
+            <span className="chart-label">
+              autocorrelation by lag · negative at lag 1 is the mean-reversion signature
+            </span>
+            <AutocorrelationBars values={data.autocorrelation} />
           </div>
         </div>
       ) : null}
@@ -361,9 +388,12 @@ export function Analytics({
   apiBase?: string;
   initialSymbols?: string;
 }) {
-  const [input, setInput] = useState(
-    initialSymbols ?? "RELIANCE TCS INFY HDFCBANK ICICIBANK SBIN",
-  );
+  // Empty, deliberately. This used to seed six blue-chips so the screen
+  // looked productive on arrival, but a pre-filled list of tickers reads as a
+  // recommendation — the console appeared to be suggesting names it had never
+  // evaluated. An empty state that says what to do is honest; a fake selection
+  // is not.
+  const [input, setInput] = useState(initialSymbols ?? "");
   const [sessions, setSessions] = useState(750);
   const [security, setSecurity] = useState<Security | null>(null);
   const [closes, setCloses] = useState<number[]>([]);
@@ -512,7 +542,20 @@ export function Analytics({
           </>
         ) : null}
         {!security && !error && !loading ? (
-          <div className="empty">Enter one or more symbols.</div>
+          <div className="empty">
+            <p>Type a symbol above, or several to compare them.</p>
+            <p className="text-secondary">
+              One name gives the full profile: returns by horizon, risk and
+              drawdown, the return distribution with its tails, rolling
+              volatility, autocorrelation by lag, and whether the series is
+              stationary enough to trade as mean reversion. Several names add a
+              correlation matrix and clustering.
+            </p>
+            <p className="text-secondary">
+              Nothing is pre-selected. Use <strong>Screener</strong> (s) to find
+              candidates by momentum, reversal, liquidity or volatility.
+            </p>
+          </div>
         ) : null}
       </div>
     </div>

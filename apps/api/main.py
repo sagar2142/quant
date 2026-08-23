@@ -18,6 +18,7 @@ mode is "trading stopped when it need not have", which is recoverable.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -54,10 +55,59 @@ STALE_CRITICAL_SECONDS = 10.0
 CYCLE_WARN_SECONDS = 36 * 3600
 CYCLE_CRITICAL_SECONDS = 96 * 3600
 
+#: The lake holds one bar per session, so a weekend alone is two days old and
+#: healthy. Four days means a missed ingest; ten means the research on screen is
+#: being computed on prices from a fortnight ago.
+LAKE_WARN_SECONDS = 4 * 24 * 3600
+LAKE_CRITICAL_SECONDS = 10 * 24 * 3600
+
 
 class FeedStatus(BaseModel):
     name: str
     health: Literal["ok", "degraded", "down"]
+
+
+def _worst(*ages: float | None) -> float | None:
+    """The oldest of several staleness readings, or None if none is known."""
+    known = [age for age in ages if age is not None]
+    return max(known) if known else None
+
+
+def _lake_staleness() -> float | None:
+    """Seconds since the most recent session in the panel, or None if unread.
+
+    Separate from the paper cycle because they fail independently and for
+    different reasons. A daemon that stopped four days ago and a lake that
+    stopped ingesting three weeks ago are different problems, and the second is
+    the one that quietly invalidates every factor study on screen.
+    """
+    from apps.api.analytics import _panel  # noqa: PLC0415 - shares the cached panel
+
+    try:
+        latest = _panel()["event_time"].max()
+    except Exception:  # noqa: BLE001 - a monitoring surface must not 500 on data
+        return None
+    if not isinstance(latest, datetime):
+        return None
+    return max(0.0, float((utc_now() - latest).total_seconds()))
+
+
+def _health(
+    staleness_seconds: float | None, warn: float, critical: float
+) -> Literal["ok", "degraded", "down"]:
+    """Health from age against a pair of thresholds.
+
+    Unknown reports "down" rather than "ok": a feed nobody could read is not a
+    healthy one, and green on an unstarted system is the same lie as a zero
+    drawdown on a losing book.
+    """
+    if staleness_seconds is None:
+        return "down"
+    if staleness_seconds >= critical:
+        return "down"
+    if staleness_seconds >= warn:
+        return "degraded"
+    return "ok"
 
 
 def _cycle_health(staleness_seconds: float | None) -> Literal["ok", "degraded", "down"]:
@@ -172,6 +222,7 @@ def create_app(
         zero.
         """
         snapshot = book_snapshot(DEFAULT_STATE_DIR, _latest_marks(None))
+        lake_age = _lake_staleness()
 
         utilisation: Decimal | None = None
         if snapshot.gross_exposure is not None:
@@ -180,8 +231,16 @@ def create_app(
                 utilisation = snapshot.gross_exposure / limit
 
         return VitalsResponse(
-            feeds=[FeedStatus(name="paper", health=_cycle_health(snapshot.staleness_seconds))],
-            staleness_seconds=snapshot.staleness_seconds,
+            feeds=[
+                FeedStatus(
+                    name="nse",
+                    health=_health(lake_age, LAKE_WARN_SECONDS, LAKE_CRITICAL_SECONDS),
+                ),
+                FeedStatus(name="paper", health=_cycle_health(snapshot.staleness_seconds)),
+            ],
+            # The worst of the two. One number on the bar must not be able to
+            # hide the other feed's problem behind the healthier one.
+            staleness_seconds=_worst(lake_age, snapshot.staleness_seconds),
             day_pnl=snapshot.day_pnl,
             day_pnl_pct=snapshot.day_pnl_pct,
             drawdown=snapshot.drawdown,

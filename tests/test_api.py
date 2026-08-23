@@ -188,6 +188,16 @@ class TestHostValidation:
         assert all(":" not in host for host in ALLOWED_HOSTS)
 
 
+def _feed(client, name: str) -> dict:
+    """One feed from /vitals, by name.
+
+    By name rather than by index: the bar carries both the lake and the paper
+    cycle, and position is not identity.
+    """
+    feeds = {f["name"]: f for f in client.get("/vitals").json()["feeds"]}
+    return feeds[name]
+
+
 class TestVitalsReadRealState:
     """`/vitals` used to return literal zeros with a docstring calling them
     placeholders. The paper daemon writes real state, and these assert the bar
@@ -231,8 +241,11 @@ class TestVitalsReadRealState:
         monkeypatch.setattr("apps.api.book.DEFAULT_STATE_DIR", tmp_path / "nothing")
         body = client.get("/vitals").json()
         assert body["book_present"] is False
-        assert body["staleness_seconds"] is None
         assert body["drawdown"] is None
+        # `staleness_seconds` is the worse of the lake and the cycle, so an
+        # absent book does not make it null — the lake still has an age. The
+        # paper feed is where "never ran" shows.
+        assert _feed(client, "paper")["health"] == "down"
 
     def test_a_book_that_never_ran_is_not_healthy(self, harness, monkeypatch, tmp_path):
         """Green on an unstarted system is the same lie as a zero drawdown on
@@ -240,28 +253,28 @@ class TestVitalsReadRealState:
         client, _, _ = harness
         monkeypatch.setattr("apps.api.main.DEFAULT_STATE_DIR", tmp_path / "nothing")
         monkeypatch.setattr("apps.api.book.DEFAULT_STATE_DIR", tmp_path / "nothing")
-        assert client.get("/vitals").json()["feeds"][0]["health"] == "down"
+        assert _feed(client, "paper")["health"] == "down"
 
     def test_a_stale_cycle_degrades_the_feed(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(hours=48))
-        assert client.get("/vitals").json()["feeds"][0]["health"] == "degraded"
+        assert _feed(client, "paper")["health"] == "degraded"
 
     def test_a_very_stale_cycle_marks_the_feed_down(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(days=7))
-        assert client.get("/vitals").json()["feeds"][0]["health"] == "down"
+        assert _feed(client, "paper")["health"] == "down"
 
     def test_a_fresh_cycle_is_healthy(self, harness, monkeypatch, tmp_path):
         from datetime import timedelta
 
         client, _, _ = harness
         self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(minutes=5))
-        assert client.get("/vitals").json()["feeds"][0]["health"] == "ok"
+        assert _feed(client, "paper")["health"] == "ok"
 
     def test_the_daily_cycle_is_not_judged_on_the_tick_feed_thresholds(self):
         """§12.7's 2s/10s describe a live tick feed. A once-a-session batch
@@ -339,3 +352,45 @@ class TestEnvironmentIsNotAsserted:
         worst thing it could do — it now reads this field."""
         client, _, _ = harness
         assert client.get("/health").json()["environment"] in {"dev", "paper", "live"}
+
+
+class TestBothFeedsAreReported:
+    """The lake and the paper cycle go stale independently.
+
+    The bar reported only the paper cycle, so a lake that stopped ingesting
+    three weeks ago was invisible while every factor study on screen was being
+    computed from it. Two feeds, and the headline staleness is the worse of the
+    two so neither can hide behind the other.
+    """
+
+    def test_the_lake_and_the_cycle_are_separate_feeds(self, harness):
+        client, _, _ = harness
+        names = {f["name"] for f in client.get("/vitals").json()["feeds"]}
+        assert names == {"nse", "paper"}
+
+    def test_headline_staleness_is_the_worse_of_the_two(self):
+        from apps.api.main import _worst
+
+        assert _worst(10.0, 500.0) == 500.0
+        assert _worst(None, 500.0) == 500.0
+        assert _worst(10.0, None) == 10.0
+        assert _worst(None, None) is None
+
+    def test_an_unknown_feed_is_down_not_healthy(self):
+        from apps.api.main import _health
+
+        assert _health(None, 100, 200) == "down"
+
+    def test_health_walks_the_thresholds(self):
+        from apps.api.main import _health
+
+        assert _health(50, 100, 200) == "ok"
+        assert _health(150, 100, 200) == "degraded"
+        assert _health(250, 100, 200) == "down"
+
+    def test_the_lake_is_judged_on_days_not_seconds(self):
+        """A weekend alone leaves the newest bar two days old, and a lake judged
+        on the tick feed's 2-second threshold would sit red permanently."""
+        from apps.api.main import LAKE_WARN_SECONDS, STALE_WARN_SECONDS
+
+        assert LAKE_WARN_SECONDS > STALE_WARN_SECONDS * 10000
