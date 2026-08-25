@@ -28,6 +28,8 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+import numpy as np
+import numpy.typing as npt
 import polars as pl
 
 from core.clock import as_decision_time
@@ -45,7 +47,7 @@ from engine.backtest.context import (
 from engine.backtest.fills import ExecutionBar, FillModel, NoLiquidityError
 from engine.backtest.sizing import OrderPlanner, SizingConfig
 from engine.costs.model import CostModel, TradeContext
-from quant.strategies.base import MarketView, Strategy
+from quant.strategies.base import MarketView, Strategy, partition_by_instrument
 
 __all__ = ["BacktestEngine"]
 
@@ -147,6 +149,12 @@ class BacktestEngine:
         # curve and re-books it the day the mistake is noticed.
         last_marks: dict[InstrumentId, Decimal] = {}
 
+        # Split once for the whole run. `MarketView.series` is called once per
+        # name per bar, and filtering the full frame each time made a backtest
+        # quadratic in its own length — 78% of the runtime was polars `collect`.
+        # The partition is unfiltered; each view applies its own cutoff.
+        partition = partition_by_instrument(history)
+
         # Stop one short: the final bar can never be an execution bar, so it can
         # never be a decision bar either.
         for index in range(len(timestamps) - 1):
@@ -170,7 +178,7 @@ class BacktestEngine:
             if index + 1 < lookback:
                 continue
 
-            view = self._build_view(history, decision_ts, universe)
+            view = self._build_view(history, decision_ts, universe, partition)
             targets = self.strategy(view)
 
             equity = self._safe_equity(portfolio, last_marks)
@@ -204,15 +212,29 @@ class BacktestEngine:
         history: pl.DataFrame,
         decision_ts: datetime,
         universe: tuple[InstrumentId, ...],
+        partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]]
+        | None = None,
     ) -> MarketView:
         """Everything observable at the decision point, and nothing else.
 
         Filters on `receive_time`, not `event_time`: a bar that closed at 15:30
         but published at 18:00 is not observable at 15:30 (§3.3).
+
+        Args:
+            partition: The whole history split by instrument, built once for
+                the run. Passed through to the view so `series` is a lookup
+                rather than a scan of the entire frame; the view applies the
+                same `receive_time` cutoff to it, so what a strategy can see is
+                unchanged.
         """
         decision_time = as_decision_time(decision_ts)
         observable = history.filter(pl.col("receive_time") <= decision_time)
-        return MarketView(as_of=decision_time, history=observable, universe=universe)
+        return MarketView(
+            as_of=decision_time,
+            history=observable,
+            universe=universe,
+            partition=partition,
+        )
 
     @staticmethod
     def _marks(history: pl.DataFrame, timestamp: datetime) -> dict[InstrumentId, Decimal]:

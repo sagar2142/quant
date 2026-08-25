@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import polars as pl
 
 from core.clock import DecisionTime
@@ -93,9 +95,18 @@ class MarketView:
 
     as_of: DecisionTime
     #: Long-format history: event_time, instrument_id, open, high, low, close, volume.
+    #: Already filtered to `receive_time <= as_of` by the engine.
     history: pl.DataFrame
     #: Universe members at this decision point.
     universe: tuple[InstrumentId, ...]
+    #: The *whole* history split by instrument, sorted, shared across every bar
+    #: of a run. Optional, and `series` falls back to filtering `history` when
+    #: it is absent, so a view built by hand behaves exactly as before.
+    #:
+    #: **This is a performance structure, not a second source of truth.** It
+    #: carries unfiltered rows, so `series` applies the `receive_time` cutoff
+    #: itself; reading it directly would hand a strategy the future.
+    partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] | None = None
 
     def closes(self) -> pl.DataFrame:
         """Wide close-price matrix: one row per timestamp, one column per name.
@@ -109,7 +120,30 @@ class MarketView:
         )
 
     def series(self, instrument_id: InstrumentId) -> pl.DataFrame:
-        """One instrument's history, ascending by time."""
+        """One instrument's observable history, ascending by time.
+
+        **This is the hot path of every cross-sectional backtest.** A strategy
+        calls it once per name per bar, and filtering the whole frame each time
+        is quadratic in the length of the run: thirty names over a thousand
+        sessions scanned a growing frame thirty thousand times, and 78% of a
+        backtest's runtime was polars `collect`.
+
+        Given the engine's partition it becomes a dict lookup plus a cutoff on
+        one instrument's own rows — a few thousand instead of a few million.
+        The cutoff is applied here rather than at partition time because the
+        partition is shared across bars and the cutoff is not.
+        """
+        if self.partition is not None:
+            found = self.partition.get(instrument_id)
+            if found is None:
+                return self.history.clear()
+            rows, receive_times = found
+            # Binary search and slice, not a filter. A filter would be correct
+            # and costs an expression per call — building `pl.lit` and a plan
+            # six thousand times a run was 17 of the remaining 36 seconds, with
+            # the data scan no longer the expensive part. `slice` is a view.
+            cutoff = int(np.searchsorted(receive_times, np.datetime64(self.as_of), side="right"))
+            return rows.slice(0, cutoff)
         return self.history.filter(pl.col("instrument_id") == instrument_id).sort("event_time")
 
     def latest_close(self) -> dict[InstrumentId, float]:
@@ -135,6 +169,42 @@ class MarketView:
         if self.history.is_empty():
             return 0
         return self.history["event_time"].n_unique()
+
+
+def partition_by_instrument(
+    history: pl.DataFrame,
+) -> dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] | None:
+    """Split a history once, for reuse across every bar of a run.
+
+    Each entry is the instrument's rows in event-time order, paired with its
+    `receive_time` column as an array so `series` can binary-search the cutoff
+    instead of building a filter expression per call.
+
+    Built from the *unfiltered* history: each view applies its own cutoff, which
+    is what lets one partition serve every decision point without leaking a
+    later bar into an earlier one.
+
+    Returns:
+        None when any instrument's `receive_time` is not ascending in
+        `event_time` order. The search assumes it is — publication lag is
+        positive, so a bar that closed later is never received earlier — and
+        rather than trust that on unknown data, this checks and declines. A
+        None partition sends `series` back to filtering, which is slower and
+        always correct.
+    """
+    if history.is_empty():
+        return None
+
+    partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] = {}
+    for key, frame in history.partition_by(
+        "instrument_id", as_dict=True, maintain_order=False
+    ).items():
+        ordered = frame.sort("event_time")
+        receive_times = ordered["receive_time"].to_numpy()
+        if receive_times.size > 1 and not np.all(receive_times[:-1] <= receive_times[1:]):
+            return None
+        partition[InstrumentId(str(key[0]))] = (ordered, receive_times)
+    return partition
 
 
 @dataclass(frozen=True)
