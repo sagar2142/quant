@@ -23,8 +23,8 @@ from quant.analytics.rolling import (
     rolling_stats,
     rolling_volatility,
 )
+from quant.research.expressions import SEASONALITY_YEARS
 from quant.research.factors import (
-    SEASONALITY_YEARS,
     Factor,
     FactorSpec,
     add_forward_returns,
@@ -42,6 +42,17 @@ SEED = 20260819
 
 
 def panel(series: dict[str, list[float]], volume: float = 1e6) -> pl.DataFrame:
+    """A panel with every column the real one has.
+
+    Open, high, low and `trades` are present because factors read them — the
+    overnight/intraday split needs the open, the Parkinson estimator needs the
+    range, and average trade size needs the transaction count. A fixture
+    carrying only close and volume would let a factor that reads any of those
+    pass its tests and fail on the first real panel.
+
+    Open is derived from the previous close with a small offset, so the
+    overnight and intraday legs are distinguishable rather than identical.
+    """
     length = len(next(iter(series.values())))
     times = [datetime(2022, 1, 1, tzinfo=UTC) + timedelta(days=i) for i in range(length)]
     return pl.concat(
@@ -53,8 +64,12 @@ def panel(series: dict[str, list[float]], volume: float = 1e6) -> pl.DataFrame:
                     # Real NSE equity ISINs begin INE; the factor pipeline filters on
                     # that to keep cash ETFs out of the universe.
                     "instrument_id": [f"NSE:INE{symbol}"] * length,
+                    "open": [closes[max(0, i - 1)] for i in range(length)],
+                    "high": [c * 1.01 for c in closes],
+                    "low": [c * 0.99 for c in closes],
                     "close": closes,
                     "volume": [volume] * length,
+                    "trades": [1000.0] * length,
                 },
                 schema_overrides={"event_time": pl.Datetime("us", "UTC")},
             )
@@ -346,3 +361,74 @@ class TestEquitiesOnly:
 
     def test_the_default_is_on(self):
         assert FactorSpec(Factor.MOMENTUM_12_1).equities_only
+
+
+class TestTailDrivenSpread:
+    """The mean spread and the rank IC can legitimately disagree, and did on
+    twelve of twenty-eight factors. In every case the median agreed with the
+    IC: the gap is a fat right tail lifting one bucket's mean above what its
+    typical member earns. A long-short book earns the mean, so the mean is
+    still the number that pays — but a mean carried by a handful of extreme
+    names is a different proposition from an effect, and nothing said so.
+    """
+
+    def skewed_panel(self) -> pl.DataFrame:
+        """Low-signal names: mostly small losses, rare enormous winners.
+
+        Their mean beats the high-signal names; their median does not. This is
+        the low-volatility anomaly's shape in miniature.
+        """
+        rng = np.random.default_rng(SEED)
+        series = {}
+        for i in range(30):
+            if i < 15:
+                # Lottery names: a few huge up-days among many small down-days.
+                steps = np.where(rng.random(400) < 0.04, 0.18, -0.004)
+            else:
+                steps = rng.normal(0.0016, 0.004, 400)
+            series[f"N{i:02d}"] = list(100.0 * np.exp(np.cumsum(steps)))
+        return panel(series)
+
+    def report(self):
+        scored = build_factor(self.skewed_panel(), FactorSpec(Factor.MOMENTUM_1M), (21,))
+        return analyse_factor(scored, "skewed", (21,), 21, 5)
+
+    def test_the_median_spread_is_reported(self):
+        assert self.report().median_spread != 0.0
+
+    def test_quantile_rows_carry_both(self):
+        rows = self.report().quantiles
+        assert all(r.median_forward_return != 0.0 for r in rows)
+
+    def test_opposing_signs_are_flagged(self):
+        report = self.report()
+        if report.spread * report.median_spread < 0:
+            assert report.is_tail_driven
+            assert "TAIL-DRIVEN" in report.format()
+
+    def test_agreeing_signs_are_not_flagged(self):
+        """A well-behaved factor must not carry the warning."""
+        rng = np.random.default_rng(SEED)
+        clean = {
+            f"N{i:02d}": list(100.0 * np.exp(np.cumsum(rng.normal((i - 15) * 0.0009, 0.004, 400))))
+            for i in range(30)
+        }
+        scored = build_factor(panel(clean), FactorSpec(Factor.MOMENTUM_1M), (21,))
+        report = analyse_factor(scored, "clean", (21,), 21, 5)
+        assert not report.is_tail_driven
+        assert "TAIL-DRIVEN" not in report.format()
+
+    def test_no_quantiles_is_not_tail_driven(self):
+        from quant.research.ic import FactorReport
+
+        empty = FactorReport(
+            factor="x",
+            horizons=[],
+            quantiles=[],
+            quantile_horizon=21,
+            turnover=0.0,
+            names=0,
+            sessions=0,
+        )
+        assert not empty.is_tail_driven
+        assert empty.median_spread == 0.0

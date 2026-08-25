@@ -13,6 +13,7 @@ invisible, so most of these assert `is None` rather than a value.
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -24,7 +25,7 @@ from core.clock import UTC, utc_now
 from core.instruments import InstrumentId
 from core.orders import Side
 from engine.accounting import CostBreakdown, Fill, Portfolio, Position
-from trading.paper.state import PaperState, PaperStateStore
+from trading.paper.state import PaperState, PaperStateStore, StateCorruptError
 from trading.risk.limits import RiskLimits
 
 RELIANCE = InstrumentId("NSE:INE002A01018")
@@ -476,3 +477,52 @@ class TestBreaksSurvive:
     def test_a_clean_cycle_has_no_breaks(self, tmp_path):
         write_state(tmp_path)
         assert book_snapshot(tmp_path).breaks == []
+
+
+class TestOlderStateFilesStillLoad:
+    """A field added to the format must not make existing accounts unreadable.
+
+    `breaks` did. Every state file written before it lacked the key, `_entries`
+    treated the absence as corruption, and the console reported a nine-position
+    book as "never started" — while the scheduled paper cycle would have
+    refused to run at all.
+    """
+
+    def legacy_state(self, tmp_path) -> pathlib.Path:
+        """A state file as an older version wrote it: no `breaks` key."""
+        write_state(tmp_path, cash=Decimal(500_000))
+        path = PaperStateStore(tmp_path).state_path
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        del raw["breaks"]
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        return path
+
+    def test_a_file_without_breaks_is_not_corrupt(self, tmp_path):
+        self.legacy_state(tmp_path)
+        state = PaperStateStore(tmp_path).restore()
+        assert state.breaks == []
+        assert state.portfolio.cash == Decimal(500_000)
+
+    def test_the_snapshot_sees_it_as_present(self, tmp_path):
+        self.legacy_state(tmp_path)
+        assert book_snapshot(tmp_path).present is True
+
+    def test_a_missing_required_field_is_still_corruption(self, tmp_path):
+        """The tolerance is for newly added fields, not for the format."""
+        write_state(tmp_path)
+        path = PaperStateStore(tmp_path).state_path
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        del raw["positions"]
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(StateCorruptError):
+            PaperStateStore(tmp_path).restore()
+
+    def test_a_malformed_breaks_value_is_still_corruption(self, tmp_path):
+        """Absent is tolerated; wrong is not."""
+        write_state(tmp_path)
+        path = PaperStateStore(tmp_path).state_path
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["breaks"] = "not a list"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(StateCorruptError):
+            PaperStateStore(tmp_path).restore()

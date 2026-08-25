@@ -112,6 +112,14 @@ class QuantileRow:
     quantile: int
     mean_forward_return: float
     names: int
+    #: Median forward return of the bucket.
+    #:
+    #: Carried beside the mean because the two disagree often enough to matter:
+    #: twelve of twenty-eight factors have a mean spread pointing one way and a
+    #: rank IC pointing the other, and in every case the median agrees with the
+    #: IC. That gap is the fat right tail of high-volatility names — a few
+    #: enormous winners lift a bucket's mean while its typical member loses.
+    median_forward_return: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,33 @@ class FactorReport:
         return self.quantiles[-1].mean_forward_return - self.quantiles[0].mean_forward_return
 
     @property
+    def median_spread(self) -> float:
+        """The same spread for the typical name rather than the average one.
+
+        A portfolio earns the mean, so `spread` is the number that pays. This
+        one says whether that mean describes the holdings or a handful of them.
+        """
+        if len(self.quantiles) < MIN_BUCKETS:
+            return 0.0
+        return self.quantiles[-1].median_forward_return - self.quantiles[0].median_forward_return
+
+    @property
+    def is_tail_driven(self) -> bool:
+        """Whether the mean spread and the typical name disagree in direction.
+
+        A long-short book earns the mean, so a factor can be genuinely
+        profitable and still fail this — but it is then being paid by a few
+        extreme observations rather than by the effect it claims to harvest,
+        and that is worth knowing before sizing anything against it. The
+        low-volatility factors are the clearest case: they win on the median
+        and lose on the mean, because the high-volatility bucket they are
+        measured against contains the lottery tickets.
+        """
+        if len(self.quantiles) < MIN_BUCKETS:
+            return False
+        return self.spread * self.median_spread < 0
+
+    @property
     def is_monotonic(self) -> bool:
         """Whether bucket returns rise with the signal.
 
@@ -171,6 +206,11 @@ class FactorReport:
             f"   monotonic {'yes' if self.is_monotonic else 'no'}"
             f"   turnover {self.turnover:.1%}/session"
         )
+        if self.is_tail_driven:
+            lines.append(
+                f"  TAIL-DRIVEN: median spread {self.median_spread:>+.3%} runs the other way"
+                " — the mean is a few extreme names, not the typical one"
+            )
         return "\n".join(lines)
 
 
@@ -280,13 +320,18 @@ def quantile_returns(
     )
     grouped = (
         bucketed.group_by("bucket")
-        .agg(pl.col(column).mean().alias("fwd"), pl.len().alias("names"))
+        .agg(
+            pl.col(column).mean().alias("fwd"),
+            pl.col(column).median().alias("fwd_median"),
+            pl.len().alias("names"),
+        )
         .sort("bucket")
     )
     return [
         QuantileRow(
             quantile=int(row["bucket"]) + 1,
             mean_forward_return=float(row["fwd"]),
+            median_forward_return=float(row["fwd_median"]),
             names=int(row["names"]),
         )
         for row in grouped.to_dicts()

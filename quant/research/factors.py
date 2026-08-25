@@ -82,6 +82,24 @@ class Factor(str, Enum):
     MAX_RETURN = "max_return"
     SEASONALITY = "seasonality"
 
+    # ── pre-registered questions (§5.1, apps.cli.preregister) ───────────────
+    # Registered with success criteria fixed before any of them was computed.
+    # None was in the library when the hypotheses were written, which is the
+    # only reason they could be pre-registered at all: the sixteen above have
+    # known results and cannot honestly be registered after the fact.
+    OVERNIGHT_MOMENTUM = "overnight_momentum"
+    INTRADAY_MOMENTUM = "intraday_momentum"
+    AVG_TRADE_SIZE = "avg_trade_size"
+    TRADE_COUNT_SHOCK = "trade_count_shock"
+    RANGE_VOL_RATIO = "range_vol_ratio"
+    MOMENTUM_CONSISTENCY = "momentum_consistency"
+    MOMENTUM_ACCELERATION = "momentum_acceleration"
+    MA200_DISTANCE = "ma200_distance"
+    VOL_OF_VOL = "vol_of_vol"
+    SEMI_DEVIATION_RATIO = "semi_deviation_ratio"
+    LOW_52W_PROXIMITY = "low_52w_proximity"
+    RESIDUAL_REVERSAL = "residual_reversal"
+
     @property
     def description(self) -> str:
         return {
@@ -153,6 +171,66 @@ class Factor(str, Enum):
                 "(Heston and Sadka). Same-month returns persist far more than "
                 "a random walk allows."
             ),
+            Factor.OVERNIGHT_MOMENTUM: (
+                "Mean close-to-open return over 21 sessions. Overnight moves "
+                "price information arriving while the exchange is shut, set by "
+                "whoever is willing to carry risk to the open."
+            ),
+            Factor.INTRADAY_MOMENTUM: (
+                "Mean open-to-close return over 21 sessions. The other half of "
+                "the day, largely liquidity provision to the flow the overnight "
+                "gap creates."
+            ),
+            Factor.AVG_TRADE_SIZE: (
+                "Traded value per transaction. Large tickets are a patient "
+                "institution working an order; small ones are retail churn. The "
+                "only factor here that reads the panel's `trades` column."
+            ),
+            Factor.TRADE_COUNT_SHOCK: (
+                "Transactions against their own 21-session norm, negated. Many "
+                "small orders is attention rather than repositioning, and "
+                "attention-driven buying reverts."
+            ),
+            Factor.RANGE_VOL_RATIO: (
+                "Parkinson high-low volatility over close-to-close volatility. "
+                "High means the session churned intraday and closed where it "
+                "started — uninformed two-sided flow."
+            ),
+            Factor.MOMENTUM_CONSISTENCY: (
+                "Fraction of the last 252 sessions that closed up. The same "
+                "annual return earned smoothly and earned in one jump are "
+                "different signals; the smooth one draws less arbitrage."
+            ),
+            Factor.MOMENTUM_ACCELERATION: (
+                "This month's return minus last month's. The second derivative "
+                "of price turns before the level does, so it sees the "
+                "inflection in flow first."
+            ),
+            Factor.MA200_DISTANCE: (
+                "Distance from the 200-day moving average. A different anchor "
+                "from the 52-week high and watched by different participants — "
+                "institutional trend filter rather than retail salience."
+            ),
+            Factor.VOL_OF_VOL: (
+                "Volatility of trailing volatility, negated. Uncertainty about "
+                "how risky a position will be is distinct from the risk itself, "
+                "and a name whose vol is unstable is hard to size."
+            ),
+            Factor.SEMI_DEVIATION_RATIO: (
+                "Downside dispersion over upside dispersion. Investors pay more "
+                "to avoid losses than to gain, so names with asymmetric "
+                "downside should carry a discount."
+            ),
+            Factor.LOW_52W_PROXIMITY: (
+                "Closeness to the 52-week low, negated. The disposition effect "
+                "near lows is a different bias from anchoring near highs, so "
+                "this is not assumed to be the mirror of high proximity."
+            ),
+            Factor.RESIDUAL_REVERSAL: (
+                "Five-day reversal computed on residual rather than raw "
+                "returns. Strips market-wide reversal, leaving the part that is "
+                "payment for absorbing an imbalance in that specific name."
+            ),
         }[self]
 
     @property
@@ -164,6 +242,7 @@ class Factor(str, Enum):
         """
         return self in {
             Factor.RESIDUAL_MOMENTUM,
+            Factor.RESIDUAL_REVERSAL,
             Factor.IDIOSYNCRATIC_VOL,
             Factor.BETA,
             Factor.DOWNSIDE_BETA,
@@ -253,100 +332,6 @@ def prepare_panel(history: pl.DataFrame, spec: FactorSpec) -> pl.DataFrame:
 
 #: Prior years averaged by the seasonality factor. Three is what a seven-year
 #: panel supports; more would drop most names for want of history.
-SEASONALITY_YEARS = 3
-
-
-def _seasonality_expression() -> pl.Expr:
-    """Mean return in this calendar month across prior years (Heston-Sadka).
-
-    Averaged over several years, not read from one. A single year-ago monthly
-    return is one noisy observation, and calling it a seasonality factor claims
-    a statistic it is not.
-    """
-    by = "symbol"
-    monthly = pl.col("close") / pl.col("close").shift(21).over(by) - 1
-    # 252 sessions is a year; the same calendar month one, two and three years
-    # back. Shifted so the current month never contributes to its own score.
-    lagged = [monthly.shift(252 * (year + 1)).over(by) for year in range(SEASONALITY_YEARS)]
-    return sum(lagged[1:], start=lagged[0]) / SEASONALITY_YEARS
-
-
-def _daily_return() -> pl.Expr:
-    return pl.col("close") / pl.col("close").shift(1).over("symbol") - 1
-
-
-def _price_expressions() -> dict[Factor, pl.Expr]:
-    """Factors computed from price and volume alone.
-
-    A table rather than a branch chain: each entry is one line of arithmetic
-    and reads as a definition, which is what these are.
-    """
-    close = pl.col("close")
-    by = "symbol"
-    daily = _daily_return()
-
-    return {
-        Factor.MOMENTUM_12_1: close.shift(21).over(by) / close.shift(252).over(by) - 1,
-        Factor.MOMENTUM_6_1: close.shift(21).over(by) / close.shift(126).over(by) - 1,
-        Factor.MOMENTUM_1M: close / close.shift(21).over(by) - 1,
-        Factor.MOMENTUM_12_7: close.shift(126).over(by) / close.shift(252).over(by) - 1,
-        Factor.REVERSAL_1D: -(close / close.shift(1).over(by) - 1),
-        Factor.REVERSAL_5D: -(close / close.shift(5).over(by) - 1),
-        Factor.VOLATILITY_60: -daily.rolling_std(60).over(by),
-        Factor.MAX_RETURN: -daily.rolling_max(21).over(by),
-        Factor.HIGH_52W_PROXIMITY: close / close.rolling_max(252).over(by),
-        # Shifted a full year, so the current month never scores itself.
-        Factor.SEASONALITY: _seasonality_expression(),
-        Factor.VOLUME_SHOCK: pl.col("volume") / pl.col("volume").rolling_mean(21).over(by),
-        # Amihud, negated so that a high score means liquid.
-        Factor.ILLIQUIDITY: -(daily.abs() / (close * pl.col("volume"))).rolling_mean(21).over(by),
-    }
-
-
-def _residual_expression(factor: Factor) -> pl.Expr:
-    """Factors read from the columns `add_residuals` attached.
-
-    Kept apart from the price factors because they have a precondition the
-    others do not: the beta regression must already have run.
-    """
-    by = "symbol"
-
-    if factor is Factor.BETA:
-        return -pl.col("beta")
-    if factor is Factor.RESIDUAL_MOMENTUM:
-        # Cumulative residual return over the 12-1 window. Summed rather than
-        # compounded: residuals are already excess of the market and small, and
-        # compounding them implies a portfolio nobody holds.
-        return pl.col("residual").rolling_sum(231).over(by).shift(21).over(by)
-    if factor is Factor.IDIOSYNCRATIC_VOL:
-        return -pl.col("residual").rolling_std(60).over(by)
-
-    # Downside beta: co-movement on sessions when the market fell. The residual
-    # is unused — what matters here is the exposure, not what is left after it.
-    down = pl.when(pl.col("market_ret") < 0).then(pl.col("ret")).otherwise(None)
-    down_market = pl.when(pl.col("market_ret") < 0).then(pl.col("market_ret")).otherwise(None)
-    mean_down = down.rolling_mean(252, min_samples=30).over(by)
-    mean_market = down_market.rolling_mean(252, min_samples=30).over(by)
-    covariance = (down * down_market).rolling_mean(252, min_samples=30).over(by) - (
-        mean_down * mean_market
-    )
-    variance = (down_market * down_market).rolling_mean(252, min_samples=30).over(by) - (
-        mean_market**2
-    )
-    return -pl.when(variance > 0).then(covariance / variance).otherwise(None)
-
-
-def _signal_expression(factor: Factor) -> pl.Expr:
-    """The factor as a Polars expression over a symbol-sorted panel.
-
-    Every `shift` is `.over("symbol")`, so a name with too little history
-    yields null rather than silently reaching into the previous instrument's
-    rows — the alignment bug that would otherwise be invisible.
-    """
-    price = _price_expressions().get(factor)
-    return price if price is not None else _residual_expression(factor)
-
-
 def add_forward_returns(
     panel: pl.DataFrame, horizons: tuple[int, ...] = FORWARD_HORIZONS
 ) -> pl.DataFrame:
@@ -386,10 +371,24 @@ def build_factor(
         from quant.research.residual import add_residuals  # noqa: PLC0415 - cycle
 
         panel = add_residuals(panel)
-    scored = panel.with_columns(_signal_expression(spec.factor).alias("signal"))
+    from quant.research.expressions import (  # noqa: PLC0415 - breaks a cycle
+        signal_expression,
+    )
+
+    scored = panel.with_columns(signal_expression(spec.factor).alias("signal"))
     with_forward = add_forward_returns(scored, horizons)
     return (
-        with_forward.select("event_time", "symbol", "signal", *[f"fwd_{h}" for h in horizons])
+        with_forward.select(
+            "event_time",
+            # Identity travels with the signal. A symbol is not identity
+            # (§3.3) — 344 of them map to more than one ISIN on this panel —
+            # and anything joining a factor score back to a position needs
+            # the key that cannot collide.
+            "instrument_id",
+            "symbol",
+            "signal",
+            *[f"fwd_{h}" for h in horizons],
+        )
         .drop_nulls("signal")
         .filter(pl.col("signal").is_finite())
     )

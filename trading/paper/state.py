@@ -261,9 +261,23 @@ def _encode_state(state: PaperState) -> dict[str, object]:
     }
 
 
-def _entries(raw: dict[str, object], key: str) -> list[dict[str, object]]:
-    """A list-of-objects field, or a loud TypeError feeding StateCorruptError."""
+def _entries(
+    raw: dict[str, object], key: str, *, required: bool = True
+) -> list[dict[str, object]]:
+    """A list-of-objects field, or a loud TypeError feeding StateCorruptError.
+
+    Args:
+        required: Whether an absent key is corruption. True for fields the
+            format has always had — a state file with no `positions` is
+            unreadable, not empty. False for fields added later: those files
+            were written correctly by an older version, and treating them as
+            corrupt makes every existing account unloadable the moment a field
+            is added. `breaks` did exactly that, and the console reported the
+            whole book as "never started" rather than as an error.
+    """
     value = raw.get(key)
+    if value is None and not required:
+        return []
     if not isinstance(value, list):
         raise TypeError(f"{key!r} should be a list, found {type(value).__name__}")
     for item in value:
@@ -312,5 +326,5 @@ def _decode_state(raw: dict[str, object]) -> PaperState:
         ),
         halted=bool(raw.get("halted", False)),
         halt_reason=str(raw.get("halt_reason", "")),
-        breaks=_entries(raw, "breaks"),  # type: ignore[arg-type]
+        breaks=_entries(raw, "breaks", required=False),  # type: ignore[arg-type]
     )
