@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
+from apps.cli.runners import build_runners
 from apps.cli.runs import NSE_SESSIONS, Panel, run_one
 from apps.cli.validate import assemble_inputs, load_market
 from apps.report.charts import PALETTE, Series, area_chart, bar_chart, line_chart
@@ -186,7 +187,9 @@ def run(argv: list[str] | None = None) -> int:
         return 1
 
     print("assembling gauntlet inputs (this runs many backtests)...")
-    inputs, neighbourhood, labels = assemble_inputs(panel, args, baseline)
+    inputs, neighbourhood, labels = assemble_inputs(
+        panel, args, baseline, build_runners(panel, args)
+    )
     report = run_gauntlet(inputs, short_circuit=False)
 
     page = build_page(

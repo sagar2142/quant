@@ -28,6 +28,7 @@ export interface HorizonRow {
 export interface BucketRow {
   quantile: number;
   forwardReturn: number;
+  medianForwardReturn: number;
   names: number;
 }
 
@@ -44,6 +45,8 @@ export interface FactorResult {
   turnover: number;
   netOfCosts: number;
   survivesCosts: boolean;
+  medianSpread: number;
+  tailDriven: boolean;
 }
 
 interface FactorOption {
@@ -165,6 +168,18 @@ export function Factors({ apiBase = "/api" }: { apiBase?: string }) {
               </span>
             </div>
 
+            {result.tailDriven ? (
+              <div className="verdict-banner verdict-warn">
+                <span className="verdict-word">TAIL-DRIVEN</span>
+                <span>
+                  median spread {formatPercent(result.medianSpread)} runs the
+                  other way — the mean is a few extreme names, not the typical
+                  one. A long-short book earns the mean, so the verdict stands;
+                  the effect it claims to harvest may not.
+                </span>
+              </div>
+            ) : null}
+
             <div className="stat-row">
               <div className="stat">
                 <div className="stat-label">names</div>
@@ -188,6 +203,8 @@ export function Factors({ apiBase = "/api" }: { apiBase?: string }) {
               </div>
             </div>
 
+            <div className="factor-split">
+            <section>
             <h3 className="analytics-subhead">
               Information coefficient — rank, per session
             </h3>
@@ -218,8 +235,11 @@ export function Factors({ apiBase = "/api" }: { apiBase?: string }) {
               </tbody>
             </table>
 
+            </section>
+            <section>
             <h3 className="analytics-subhead">
               Quantile forward return — {result.quantileHorizon}d
+              <span className="subhead-note">mean, with median beside it</span>
             </h3>
             <div className="buckets">
               {result.buckets.map((b) => (
@@ -234,8 +254,15 @@ export function Factors({ apiBase = "/api" }: { apiBase?: string }) {
                   <span className={`bucket-value ${signClass(b.forwardReturn)}`}>
                     {formatPercent(b.forwardReturn)}
                   </span>
+                  {/* The median beside the mean: where they diverge, the
+                      bucket's average is a tail rather than its typical name. */}
+                  <span className="bucket-median text-secondary">
+                    {formatPercent(b.medianForwardReturn)}
+                  </span>
                 </div>
               ))}
+            </div>
+            </section>
             </div>
 
             <div className="analytics-note text-secondary">{result.description}</div>

@@ -25,8 +25,10 @@ from engine.costs.india import NseEquityCostModel
 from engine.costs.model import ScaledCostModel
 from engine.validation.generators import SeededRunner, UniverseRunner
 from quant.math.metrics.performance import returns_from_equity
+from quant.research.factors import Factor, FactorSpec, build_factor
 from quant.strategies.base import Strategy
 from quant.strategies.baselines import CrossSectionalMomentum, RandomEntry
+from quant.strategies.signal import SignalStrategy
 
 __all__ = [
     "COMPARE_FRACTION",
@@ -35,12 +37,17 @@ __all__ = [
     "SEED",
     "SWEEP_LOOKBACK",
     "SWEEP_SKIP",
+    "SWEEP_TOP_FRACTION",
     "Panel",
     "SweepTooShortError",
     "build_market",
     "corrupt_future",
     "dropout_runner",
+    "factor_dropout_runner",
+    "factor_placebo_runner",
+    "factor_scores",
     "placebo_runner",
+    "run_factor",
     "run_one",
     "run_strategy",
 ]
@@ -163,6 +170,74 @@ def placebo_runner(panel: Panel, lookback: int) -> SeededRunner:
                 hold_bars=1,  # momentum re-decides every bar
                 lookback=lookback + 1,
             ),
+        )
+
+    return run
+
+
+#: Fractions of the scored universe a factor strategy holds. The sweep for a
+#: factor, in place of momentum's lookback and skip: concentration is the one
+#: parameter a precomputed signal actually has, and a plateau across it is the
+#: same evidence a plateau across lookbacks would be.
+SWEEP_TOP_FRACTION = (Decimal("0.1"), Decimal("0.2"), Decimal("0.3"), Decimal("0.4"))
+
+
+def factor_scores(panel: Panel, factor: Factor, sessions: int) -> pl.DataFrame:
+    """Signal panel for one factor, scored over the same history the gauntlet
+    trades.
+
+    Built once and reused by every runner below. Rebuilding per configuration
+    would be slow and, worse, would let a sweep silently score each
+    configuration on a slightly different universe.
+
+    The forward-return column `build_factor` attaches is dropped here.
+    `SignalStrategy` refuses a panel carrying one and is right to: those are
+    the future, and a backtest handed them would be reading the answer. The
+    guard caught exactly that when this function first passed them through.
+    """
+    scored = build_factor(panel.history, FactorSpec(factor, window=sessions), (1,))
+    if scored.is_empty():
+        return scored
+    return scored.select("event_time", "symbol", "signal")
+
+
+def run_factor(
+    panel: Panel,
+    scores: pl.DataFrame,
+    top_fraction: Decimal,
+    cost_multiple: Decimal = Decimal(1),
+) -> npt.NDArray[np.float64]:
+    """Per-bar returns for one factor configuration."""
+    return run_strategy(
+        panel,
+        SignalStrategy(scores, top_fraction=top_fraction, name="factor"),
+        cost_multiple,
+    )
+
+
+def factor_dropout_runner(
+    panel: Panel, scores: pl.DataFrame, top_fraction: Decimal
+) -> UniverseRunner:
+    """The factor equivalent of `dropout_runner` — test 8."""
+
+    def run(universe: tuple[InstrumentId, ...]) -> npt.NDArray[np.float64]:
+        return run_factor(replace(panel, universe=universe), scores, top_fraction)
+
+    return run
+
+
+def factor_placebo_runner(panel: Panel, top_fraction: Decimal, lookback: int) -> SeededRunner:
+    """Random entry holding the same number of names — test 10.
+
+    Matched to the factor strategy's concentration rather than momentum's, so
+    the comparison isolates the signal rather than the position count.
+    """
+    n_names = max(1, int(len(panel.universe) * float(top_fraction)))
+
+    def run(seed: int) -> npt.NDArray[np.float64]:
+        return run_strategy(
+            panel,
+            RandomEntry(seed=seed, n_names=n_names, hold_bars=1, lookback=lookback + 1),
         )
 
     return run

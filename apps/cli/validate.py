@@ -33,20 +33,16 @@ import numpy.typing as npt
 import polars as pl
 
 from apps.cli.backtest import build_universe, load_panel, nse_instrument
+from apps.cli.runners import Runners, build_runners, sweep_configurations
 from apps.cli.runs import (
     COMPARE_FRACTION,
     MOMENTUM_TOP_FRACTION,
     NSE_SESSIONS,
     SEED,
-    SWEEP_LOOKBACK,
-    SWEEP_SKIP,
     Panel,
     SweepTooShortError,
     build_market,
     corrupt_future,
-    dropout_runner,
-    placebo_runner,
-    run_one,
 )
 from core.config import settings
 from core.instruments import InstrumentId
@@ -67,6 +63,7 @@ from engine.validation.generators import (
 from engine.validation.report import MIN_DROPOUT_SAMPLES, MIN_PLACEBO_SAMPLES, GauntletReport
 from ops.db import optional_connection
 from quant.math.metrics.performance import summarise
+from quant.research.factors import Factor
 from quant.strategies.baselines import CrossSectionalMomentum
 
 
@@ -114,6 +111,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--skip", type=int, default=5)
+    parser.add_argument(
+        "--factor",
+        default=None,
+        choices=[f.value for f in Factor],
+        help=(
+            "Validate a factor signal instead of the momentum strategy. The "
+            "swept parameter becomes concentration rather than lookback."
+        ),
+    )
+    parser.add_argument(
+        "--top-fraction",
+        type=float,
+        default=0.2,
+        help="Share of the scored universe a factor strategy holds.",
+    )
     parser.add_argument("--lake", default=None)
     parser.add_argument(
         "--hypothesis",
@@ -194,15 +206,11 @@ def load_market(args: argparse.Namespace) -> tuple[Panel, list[float]] | None:
     return panel, equity
 
 
-def sweep_configurations() -> list[tuple[int, int]]:
-    """Every (lookback, skip) the neighbourhood is measured over."""
-    return [
-        (lookback, skip) for lookback in SWEEP_LOOKBACK for skip in SWEEP_SKIP if skip < lookback
-    ]
-
-
 def assemble_inputs(
-    panel: Panel, args: argparse.Namespace, baseline: npt.NDArray[np.float64]
+    panel: Panel,
+    args: argparse.Namespace,
+    baseline: npt.NDArray[np.float64],
+    runners: Runners,
 ) -> tuple[GauntletInputs, list[float], list[str]]:
     """Re-run the backtest under every condition the twelve checks require.
 
@@ -212,19 +220,18 @@ def assemble_inputs(
     than the one that was judged.
     """
     history = panel.history
-    corrupted = run_one(replace(panel, history=corrupt_future(history)), args.lookback, args.skip)
+    corrupted = runners.once(replace(panel, history=corrupt_future(history)), Decimal(1))
     size = int(min(baseline.size, corrupted.size) * COMPARE_FRACTION)
     shuffled = np.concatenate([corrupted[:size], baseline[size:]])
 
     sweep: list[npt.NDArray[np.float64]] = []
     neighbourhood: list[float] = []
     labels: list[str] = []
-    for lookback, skip in sweep_configurations():
-        rets = run_one(panel, lookback, skip)
+    for label, rets in runners.sweep(panel):
         if rets.size:
             sweep.append(rets)
             neighbourhood.append(summarise(rets, periods_per_year=NSE_SESSIONS).sharpe)
-            labels.append(f"{lookback}/{skip}")
+            labels.append(label)
 
     if not sweep:
         raise SweepTooShortError
@@ -235,14 +242,14 @@ def assemble_inputs(
 
     print(f"universe dropout: {args.dropout_samples} subsets at {DROPOUT_FRACTION:.0%} removed...")
     dropout = universe_dropout_sharpes(
-        dropout_runner(panel, args.lookback, args.skip),
+        runners.dropout(panel),
         panel.universe,
         SamplingSpec(seed=SEED, samples=args.dropout_samples, periods_per_year=NSE_SESSIONS),
     )
 
     print(f"placebo: {args.placebo_samples} random-entry runs...")
     placebo = placebo_sharpes(
-        placebo_runner(panel, args.lookback),
+        runners.placebo(panel),
         SamplingSpec(seed=SEED, samples=args.placebo_samples, periods_per_year=NSE_SESSIONS),
     )
 
@@ -262,7 +269,7 @@ def assemble_inputs(
         in_sample_returns=baseline[:split],
         out_of_sample_returns=baseline[split:],
         parameter_neighbourhood=np.array(neighbourhood),
-        tripled_cost_returns=run_one(panel, args.lookback, args.skip, Decimal(3)),
+        tripled_cost_returns=runners.once(panel, Decimal(3)),
         universe_dropout_sharpes=dropout,
         regime_returns=dict(regimes) if regimes else None,
         placebo_sharpes=placebo,
@@ -324,12 +331,11 @@ def run(argv: list[str] | None = None) -> int:
         return 1
     panel, _equity = market
 
-    print(
-        f"assembling gauntlet inputs for momentum({args.lookback}/{args.skip}) "
-        f"over {len(panel.universe)} NSE names..."
-    )
+    runners_label = build_runners(panel, args).label
+    print(f"assembling gauntlet inputs for {runners_label} over {len(panel.universe)} NSE names...")
 
-    baseline = run_one(panel, args.lookback, args.skip)
+    runners = build_runners(panel, args)
+    baseline = runners.once(panel, Decimal(1))
     if baseline.size == 0:
         print("no returns produced — the panel is shorter than the lookback")
         return 1
@@ -341,7 +347,7 @@ def run(argv: list[str] | None = None) -> int:
         print("\n  WARNING: Sharpe above the 2.5 smell test (§2.1) — suspect a leak")
 
     try:
-        inputs, _neighbourhood, _labels = assemble_inputs(panel, args, baseline)
+        inputs, _neighbourhood, _labels = assemble_inputs(panel, args, baseline, runners)
     except SweepTooShortError as exc:
         print(exc)
         return 1

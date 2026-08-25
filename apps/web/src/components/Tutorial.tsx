@@ -52,15 +52,16 @@ const STEPS: Step[] = [
   {
     n: 3,
     title: "Score a signal",
-    cost: "~3 min for all 16",
+    cost: "~5 min for all 28",
     what:
       "Does this idea predict anything at all? Information Coefficient at four " +
       "horizons, quintile buckets, turnover, and whether the spread survives the " +
-      "22bp NSE round trip. Still the cheapest question, so it goes first.",
+      "33bp NSE round trip the cost model actually charges. Still the cheapest " +
+      "question, so it goes first.",
     screen: "Factors  (f)",
     command: "python -m apps.cli.factor --all",
     failure:
-      "DIES ON COSTS is the normal outcome — 12 of 16 do. Kill it here and lose three " +
+      "DIES ON COSTS is the normal outcome — 24 of 28 do. Kill it here and lose five " +
       "minutes instead of an afternoon.",
   },
   {
@@ -69,8 +70,9 @@ const STEPS: Step[] = [
     cost: "~2 seconds",
     what:
       "Combining two factors that measure the same thing counts one effect twice and " +
-      "calls it diversification. The 16-factor library is worth about 6 independent " +
-      "bets; momentum and 52-week-high correlate at 0.65.",
+      "calls it diversification. The library is worth about 6 independent bets; " +
+      "momentum_12_1 and residual_momentum correlate at 0.97, which the Risk model " +
+      "screen makes visible as a single shared exposure.",
     command: "python -m apps.cli.factor --overlap",
     failure:
       "High overlap is not fatal — it tells you which factor to drop before combining.",
@@ -154,7 +156,8 @@ const PRINCIPLES = [
   {
     title: "Cheapest question first",
     body:
-      "Six seconds, then minutes, then 48 backtests, then six weeks. Most ideas should " +
+      "Minutes, then more minutes, then dozens of backtests, then six weeks. Most ideas " +
+      "should " +
       "die at the first stage. Running them in the wrong order is how a month " +
       "disappears into one bad idea.",
   },
@@ -264,6 +267,7 @@ export function Tutorial({ onDismiss }: { onDismiss?: () => void }) {
               <tbody>
                 {[
                   ["Factors", "f", "Does this signal predict anything? Does it survive costs?"],
+                  ["Risk model", "m", "How much of the book's risk is a factor, and how much is the names in it?"],
                   ["Screener", "s", "Which of 3,268 names? By momentum, reversal, liquidity, volatility."],
                   ["Analytics", "a", "What is this name? Returns, risk, stationarity, correlation, clusters."],
                   ["Overview", "o", "What is the book doing right now?"],

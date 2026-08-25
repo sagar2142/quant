@@ -845,3 +845,51 @@ tbody tr:hover {
   color: inherit;
   font: inherit;
 }
+
+
+/* ── factor research (§12.10) ────────────────────────────────────────────── */
+
+/* Two columns once there is room. The IC table and the quantile chart are read
+   together — one says whether the signal ranks names correctly, the other what
+   that ranking earned — and stacking them put the second below the fold at
+   every window size, which is where a cost verdict goes unread. */
+.factor-split {
+  display: grid;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+@media (min-width: 1100px) {
+  .factor-split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--space-5, 24px);
+  }
+}
+
+/* The median sits beside the mean, dimmer: it qualifies the bar rather than
+   competing with it. */
+.bucket-median {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+  text-align: right;
+}
+
+.subhead-note {
+  margin-left: var(--space-2);
+  color: var(--text-tertiary);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* An amber verdict for a result that is real but not what it appears to be.
+   Distinct from the red of "dies on costs": that one is a rejection, this is a
+   caveat on an acceptance. */
+.verdict-warn {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
+.verdict-warn .verdict-word { color: var(--warn); }

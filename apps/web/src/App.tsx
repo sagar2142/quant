@@ -15,6 +15,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { Analytics } from "./components/Analytics";
 import { Factors } from "./components/Factors";
 import { Tutorial } from "./components/Tutorial";
+import { RiskModel } from "./components/RiskModel";
 import { Screener } from "./components/Screener";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import { PriceChart } from "./components/Sparkline";
@@ -36,7 +37,17 @@ import "./shell.css";
 //: reference thereafter.
 const SEEN_TUTORIAL = "neutron.tutorial.seen";
 
-type Screen = "tutorial" | "overview" | "factors" | "screener" | "analytics" | "positions" | "blotter" | "risk" | "reconcile";
+type Screen =
+  | "tutorial"
+  | "overview"
+  | "factors"
+  | "riskmodel"
+  | "screener"
+  | "analytics"
+  | "positions"
+  | "blotter"
+  | "risk"
+  | "reconcile";
 
 const SCREENS: {
   id: Screen;
@@ -49,6 +60,7 @@ const SCREENS: {
   { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
   { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
   { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
+  { group: "Analysis", id: "riskmodel", label: "Risk model", icon: "◈", key: "m" },
   { group: "Operations", id: "overview", label: "Overview", icon: "◧", key: "o" },
   { group: "Operations", id: "positions", label: "Positions", icon: "▤", key: "p" },
   { group: "Operations", id: "blotter", label: "Blotter", icon: "▦", key: "b" },
@@ -450,6 +462,11 @@ export function App({
             {screen === "factors" ? (
               <Panel title="Factor research" flush>
                 <Factors />
+              </Panel>
+            ) : null}
+            {screen === "riskmodel" ? (
+              <Panel title="Risk decomposition" flush>
+                <RiskModel />
               </Panel>
             ) : null}
             {screen === "screener" ? (
