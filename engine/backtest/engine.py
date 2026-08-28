@@ -34,9 +34,8 @@ import polars as pl
 
 from core.clock import as_decision_time
 from core.instruments import Instrument, InstrumentId
-from core.orders import Side
 from data.corpactions.actions import ActionType, CorporateActionBook
-from engine.accounting import Fill, Portfolio
+from engine.accounting import Portfolio
 from engine.backtest.context import (
     BacktestConfig,
     BacktestResult,
@@ -44,9 +43,10 @@ from engine.backtest.context import (
     RunState,
     validate_history,
 )
-from engine.backtest.fills import ExecutionBar, FillModel, NoLiquidityError
+from engine.backtest.execution import execute_order
+from engine.backtest.fills import FillModel
 from engine.backtest.sizing import OrderPlanner, SizingConfig
-from engine.costs.model import CostModel, TradeContext
+from engine.costs.model import CostModel
 from quant.strategies.base import MarketView, Strategy, partition_by_instrument
 
 __all__ = ["BacktestEngine"]
@@ -190,7 +190,9 @@ class BacktestEngine:
 
             execution_slice = history.filter(pl.col("event_time") == execution_ts)
             for instrument_id, quantity in orders:
-                if self._execute(state, instrument_id, quantity, execution_slice, execution_ts):
+                if execute_order(
+                    self, state, instrument_id, quantity, execution_slice, execution_ts
+                ):
                     result.orders_filled += 1
 
         # Value the book on the final bar so the curve ends where the data does.
@@ -270,138 +272,6 @@ class BacktestEngine:
             price = marks.get(instrument_id, position.average_price)
             total += position.market_value(price)
         return total
-
-    def _execute(
-        self,
-        state: RunState,
-        instrument_id: InstrumentId,
-        quantity: Decimal,
-        execution_slice: pl.DataFrame,
-        execution_ts: datetime,
-    ) -> bool:
-        """Fill one order into the execution bar. Returns whether it filled."""
-        portfolio, result = state.portfolio, state.result
-        rows = execution_slice.filter(pl.col("instrument_id") == instrument_id)
-        if rows.is_empty():
-            # The instrument did not trade this session. Counted separately: a
-            # delisting is not a defect in our order logic.
-            result.orders_no_market += 1
-            return False
-
-        row = rows.row(0, named=True)
-        instrument = self.instruments[instrument_id]
-        bar = ExecutionBar(
-            instrument=instrument,
-            open=_to_decimal(row["open"]),
-            high=_to_decimal(row["high"]),
-            low=_to_decimal(row["low"]),
-            close=_to_decimal(row["close"]),
-            volume=_to_decimal(row["volume"]),
-        )
-        side = Side.BUY if quantity > 0 else Side.SELL
-        wanted = abs(quantity)
-
-        if side is Side.BUY:
-            wanted = self._affordable(portfolio, bar, self.fill_model.reference_price(bar), wanted)
-            if wanted <= 0:
-                result.orders_unfunded += 1
-                return False
-
-        try:
-            simulated = self.fill_model.simulate(
-                bar,
-                side,
-                wanted,
-                allow_partial=self.config.allow_partial_fills,
-            )
-        except NoLiquidityError:
-            # The bar could not absorb the order — zero volume, zero range, or
-            # past the participation cap. Counted once, under liquidity. It is
-            # not a rejection: nothing in our logic went wrong, the market was
-            # simply not deep enough.
-            result.liquidity_failures += 1
-            return False
-
-        quantity = simulated.quantity
-        if side is Side.BUY:
-            # Final trim against the *realised* fill price. The earlier check
-            # used the fill model's reference price, and `simulate` then moved
-            # it against us by the slippage. Without this the account overdraws
-            # by exactly the slippage on the last order of a fully-invested
-            # rebalance — which presents as a rejection rather than a bug.
-            quantity = self._affordable(portfolio, bar, simulated.price, quantity)
-            if quantity <= 0:
-                result.orders_unfunded += 1
-                return False
-
-        costs = self.cost_model.cost(
-            TradeContext(
-                instrument=instrument,
-                side=side,
-                quantity=quantity,
-                price=simulated.price,
-                adv_value=bar.volume * bar.typical,
-            )
-        )
-        fill = Fill(
-            instrument_id=instrument_id,
-            side=side,
-            quantity=quantity,
-            price=simulated.price,
-            costs=costs,
-            event_time=execution_ts,
-            multiplier=instrument.multiplier,
-        )
-
-        try:
-            realised = portfolio.apply_fill(fill)
-        except Exception:  # noqa: BLE001 — insufficient cash is a rejection, not a crash
-            result.orders_rejected += 1
-            return False
-
-        state.trades.append(
-            {
-                "event_time": execution_ts,
-                "instrument_id": instrument_id,
-                "side": side.value,
-                "quantity": float(quantity),
-                "price": float(simulated.price),
-                "costs": float(costs.total),
-                "realised_pnl": float(realised),
-            }
-        )
-        return True
-
-    def _affordable(
-        self,
-        portfolio: Portfolio,
-        bar: ExecutionBar,
-        price: Decimal,
-        wanted: Decimal,
-    ) -> Decimal:
-        """Largest buy the account can fund at `price`.
-
-        Delegates the arithmetic to the planner (§14.2). The important detail is
-        that `cost_of` builds the *same* `TradeContext` the charge will use —
-        including `adv_value`, which enables the square-root impact term. An
-        estimate that omits impact under-charges by exactly the impact, and the
-        order then overdraws by that amount.
-        """
-        instrument = bar.instrument
-        adv_value = bar.volume * bar.typical
-
-        def cost_of(quantity: Decimal, at_price: Decimal) -> Decimal:
-            return self.cost_model.cost(
-                TradeContext(
-                    instrument=instrument,
-                    side=Side.BUY,
-                    quantity=quantity,
-                    price=at_price,
-                    adv_value=adv_value,
-                )
-            ).total
-
-        return self.planner.affordable(portfolio, instrument, price, wanted, cost_of)
 
     @staticmethod
     def _equity_row(

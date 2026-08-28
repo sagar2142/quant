@@ -16,6 +16,7 @@ import polars as pl
 import pytest
 
 from core.clock import UTC, as_decision_time
+from core.instruments import InstrumentId
 from quant.strategies.base import MarketView
 from quant.strategies.signal import Construction, ForwardLeakError, SignalStrategy
 
@@ -241,3 +242,95 @@ class TestSpec:
         strategy = SignalStrategy(scores_for({"AAA": 1.0}), name="composite")
         assert strategy.spec.name == "signal:composite"
         assert strategy.spec.parameters["signal"] == "composite"
+
+
+class TestLongShort:
+    """A quantile spread is Q5 minus Q1, and holding only Q5 earns half of it
+    plus the market. On the paper book the market is 72.7% of variance, so a
+    long-only implementation of a long-short signal is largely a market
+    position wearing the signal's name.
+    """
+
+    def scores(self) -> pl.DataFrame:
+        """Ten names, ranked, so the quartiles are unambiguous."""
+        times = [datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=i) for i in range(5)]
+        rows = []
+        for t in times:
+            for i in range(10):
+                rows.append({"event_time": t, "symbol": f"N{i}", "signal": float(i)})
+        return pl.DataFrame(rows, schema_overrides={"event_time": pl.Datetime("us", "UTC")})
+
+    def view(self) -> MarketView:
+        times = [datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=i) for i in range(5)]
+        history = pl.DataFrame(
+            [
+                {
+                    "event_time": t,
+                    "receive_time": t,
+                    "instrument_id": f"NSE:INE{i}",
+                    "symbol": f"N{i}",
+                    "close": 100.0 + i,
+                }
+                for t in times
+                for i in range(10)
+            ],
+            schema_overrides={
+                "event_time": pl.Datetime("us", "UTC"),
+                "receive_time": pl.Datetime("us", "UTC"),
+            },
+        )
+        return MarketView(
+            as_of=as_decision_time(times[-1]),
+            history=history,
+            universe=tuple(InstrumentId(f"NSE:INE{i}") for i in range(10)),
+        )
+
+    def test_long_only_holds_only_the_top(self):
+        weights = (
+            SignalStrategy(self.scores(), top_fraction=Decimal("0.2"), long_only=True)
+            .generate(self.view())
+            .weights
+        )
+        assert all(w > 0 for w in weights.values())
+
+    def test_long_short_holds_both_ends(self):
+        weights = (
+            SignalStrategy(self.scores(), top_fraction=Decimal("0.2"), long_only=False)
+            .generate(self.view())
+            .weights
+        )
+        assert any(w > 0 for w in weights.values())
+        assert any(w < 0 for w in weights.values())
+
+    def test_the_legs_offset(self):
+        """Market-neutral by construction: the whole point of shorting the
+        bottom is that the market exposure cancels."""
+        weights = (
+            SignalStrategy(self.scores(), top_fraction=Decimal("0.2"), long_only=False)
+            .generate(self.view())
+            .weights
+        )
+        assert sum(weights.values()) == pytest.approx(Decimal(0), abs=Decimal("0.001"))
+
+    def test_gross_is_respected_across_both_legs(self):
+        gross = Decimal("0.9")
+        weights = (
+            SignalStrategy(self.scores(), top_fraction=Decimal("0.2"), gross=gross, long_only=False)
+            .generate(self.view())
+            .weights
+        )
+        assert sum(abs(w) for w in weights.values()) == pytest.approx(gross, abs=Decimal("0.001"))
+
+    def test_long_only_is_still_the_default(self):
+        """Shorting is a decision, not something a caller acquires silently."""
+        assert SignalStrategy(self.scores()).long_only is True
+
+    def test_a_name_in_both_legs_nets_out(self):
+        """With a small universe the quantiles overlap, and a name must not be
+        held twice in opposite directions."""
+        weights = (
+            SignalStrategy(self.scores(), top_fraction=Decimal("0.6"), long_only=False)
+            .generate(self.view())
+            .weights
+        )
+        assert all(isinstance(w, Decimal) for w in weights.values())

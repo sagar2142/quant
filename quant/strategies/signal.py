@@ -131,6 +131,7 @@ class SignalStrategy(Strategy):
         *,
         top_fraction: Decimal = Decimal("0.2"),
         construction: Construction = Construction.EQUAL,
+        long_only: bool = True,
         gross: Decimal = Decimal(1),
         max_position: Decimal = Decimal("0.10"),
         name: str = "signal",
@@ -165,6 +166,7 @@ class SignalStrategy(Strategy):
         self.scores = scores.sort("event_time")
         self.top_fraction = top_fraction
         self.construction = construction
+        self.long_only = long_only
         self.gross = gross
 
     @staticmethod
@@ -225,15 +227,25 @@ class SignalStrategy(Strategy):
         return deviation if deviation > 0 else None
 
     def _weights(
-        self, view: MarketView, chosen: list[tuple[InstrumentId, float]]
+        self,
+        view: MarketView,
+        chosen: list[tuple[InstrumentId, float]],
+        leg: Decimal | None = None,
     ) -> dict[InstrumentId, Decimal]:
-        """Turn selected names into fractions of NAV."""
+        """Turn selected names into fractions of NAV.
+
+        Args:
+            leg: Gross for this side. Defaults to the whole book, which is what
+                a long-only construction wants; a long-short one passes half so
+                the two sides together come to `gross`.
+        """
+        gross = self.gross if leg is None else leg
         if self.construction is Construction.SCORE:
             # Rank, not raw score: a signal's units are arbitrary and one
             # extreme value would otherwise take most of the book.
             ranks = {name: float(i + 1) for i, (name, _) in enumerate(reversed(chosen))}
             total = sum(ranks.values())
-            return {name: self.gross * Decimal(str(rank / total)) for name, rank in ranks.items()}
+            return {name: gross * Decimal(str(rank / total)) for name, rank in ranks.items()}
 
         if self.construction is Construction.INVERSE_VOL:
             inverse = {}
@@ -249,11 +261,10 @@ class SignalStrategy(Strategy):
                 inverse = {k: (v if v > 0 else fallback) for k, v in inverse.items()}
                 total = sum(inverse.values())
                 return {
-                    name: self.gross * Decimal(str(value / total))
-                    for name, value in inverse.items()
+                    name: gross * Decimal(str(value / total)) for name, value in inverse.items()
                 }
 
-        weight = self.gross / Decimal(len(chosen))
+        weight = gross / Decimal(len(chosen))
         return {name: weight for name, _ in chosen}
 
     def generate(self, view: MarketView) -> TargetWeights:
@@ -265,6 +276,22 @@ class SignalStrategy(Strategy):
         # over the same data hold the same book (§14.1.1).
         ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
         count = max(1, int(len(ranked) * float(self.top_fraction)))
-        chosen = ranked[:count]
 
-        return TargetWeights(view.as_of, self._weights(view, chosen))
+        if self.long_only:
+            return TargetWeights(view.as_of, self._weights(view, ranked[:count]))
+
+        # Long the top, short the bottom, each leg at half the gross. This is
+        # the portfolio the factor lab actually measures: a quantile spread is
+        # Q5 minus Q1, and holding only Q5 earns half of it plus the market.
+        # On the paper book the market is 72.7% of variance, so a long-only
+        # implementation of a long-short signal is mostly a market position
+        # wearing the signal's name.
+        longs = self._weights(view, ranked[:count], leg=self.gross / 2)
+        shorts = self._weights(view, ranked[-count:], leg=self.gross / 2)
+        weights = dict(longs)
+        for instrument_id, weight in shorts.items():
+            # A name in both legs nets out rather than being held twice, which
+            # happens whenever the universe is small enough that the quantiles
+            # overlap.
+            weights[instrument_id] = weights.get(instrument_id, Decimal(0)) - weight
+        return TargetWeights(view.as_of, weights)

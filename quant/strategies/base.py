@@ -142,7 +142,13 @@ class MarketView:
             # and costs an expression per call — building `pl.lit` and a plan
             # six thousand times a run was 17 of the remaining 36 seconds, with
             # the data scan no longer the expensive part. `slice` is a view.
-            cutoff = int(np.searchsorted(receive_times, np.datetime64(self.as_of), side="right"))
+            # tzinfo is dropped deliberately rather than left to numpy, which
+            # does the same conversion but warns that it has no representation
+            # for timezones. Every timestamp in this system is UTC — the clock
+            # module refuses anything else — so a naive UTC value is the same
+            # instant, and saying so explicitly beats depending on a warning.
+            as_of_utc = np.datetime64(self.as_of.replace(tzinfo=None), "us")
+            cutoff = int(np.searchsorted(receive_times, as_of_utc, side="right"))
             return rows.slice(0, cutoff)
         return self.history.filter(pl.col("instrument_id") == instrument_id).sort("event_time")
 
