@@ -46,7 +46,13 @@ from data.store.panel import PanelStore
 from engine.experiments.registry import HypothesisStatus
 from engine.experiments.repository import ExperimentRepository
 from ops.db import optional_connection
-from quant.research.factors import FORWARD_HORIZONS, Factor, FactorSpec, build_factor
+from quant.research.factors import (
+    FORWARD_HORIZONS,
+    Factor,
+    FactorSpec,
+    build_factor,
+    prepare_panel,
+)
 from quant.research.ic import analyse_factor
 
 RULE = "─" * 78
@@ -58,6 +64,16 @@ RULE = "─" * 78
 #: Those are left OPEN: the alternative is resolving a hypothesis against a test
 #: that was never run, which would put a verdict in the record with nothing
 #: behind it.
+#: The four questions the factor lab cannot express, and the study that can.
+#: Each returns the statistic its hypothesis committed to, plus the direction
+#: the hypothesis predicted, so the verdict is read off the same way.
+STUDIED_BY: dict[str, tuple[str, str]] = {
+    "Opening gaps mean-revert": ("gap_reversion", "negative"),
+    "Short-term reversal is stronger": ("conditional_ic", "positive"),
+    "Cross-sectional return dispersion times": ("dispersion_timing", "positive"),
+    "The illiquidity premium survives": ("double_sorted_ic", "positive"),
+}
+
 TESTED_BY: dict[str, Factor | None] = {
     "Overnight returns and intraday returns": Factor.OVERNIGHT_MOMENTUM,
     "Average trade size predicts": Factor.AVG_TRADE_SIZE,
@@ -168,6 +184,71 @@ def judge(  # noqa: PLR0913, PLR0917 - a hypothesis, its criteria, and the data 
     return Verdict(HypothesisStatus.OPEN, reason)
 
 
+def run_study(history: pl.DataFrame, name: str, predicted: str) -> Verdict:
+    """Run one of the four studies and judge it against its own prediction.
+
+    A study answers a claim rather than producing a signal, so the verdict is
+    read off the direction and significance the hypothesis committed to. A
+    result that is significant in the *opposite* direction is a rejection, not
+    a near miss — the prediction was wrong, and saying so is the point.
+    """
+    from quant.research.studies import (  # noqa: PLC0415 - keeps the import local
+        conditional_ic,
+        dispersion_timing,
+        double_sorted_ic,
+        gap_reversion,
+    )
+
+    if name == "gap_reversion":
+        prepped = prepare_panel(history, FactorSpec(Factor.REVERSAL_5D))
+        result = gap_reversion(prepped)
+    elif name == "conditional_ic":
+        result = conditional_ic(history, FactorSpec(Factor.REVERSAL_5D), 5, "volume")
+    elif name == "dispersion_timing":
+        result = dispersion_timing(history, FactorSpec(Factor.MOMENTUM_12_1), 21)
+    else:
+        result = double_sorted_ic(history, FactorSpec(Factor.ILLIQUIDITY), 21, "volume")
+
+    reason = f"{name}: {result.statistic:+.4f} t {result.t_stat:+.2f} n {result.observations}"
+    if not result.is_significant:
+        return Verdict(HypothesisStatus.REJECTED, f"{reason} — not significant")
+
+    right_way = result.statistic < 0 if predicted == "negative" else result.statistic > 0
+    if not right_way:
+        return Verdict(HypothesisStatus.REJECTED, f"{reason} — sign opposite to the prediction")
+
+    # A claim that survives its own test is not yet a strategy: none of these
+    # produces a tradeable signal on its own, and confirming here would skip
+    # every stage between a finding and a book.
+    return Verdict(HypothesisStatus.OPEN, f"{reason} — holds, but is not yet a signal")
+
+
+def resolve_one(
+    history: pl.DataFrame,
+    statement: str,
+    success: dict[str, object],
+    kill: dict[str, object],
+    args: argparse.Namespace,
+) -> Verdict | None:
+    """The verdict for one statement, or None if it is not a catalogue entry.
+
+    Two routes, because the catalogue asks two shapes of question: eleven are
+    cross-sectional signals the factor lab scores, and four are claims that
+    need a study of their own. Both are judged against what the hypothesis
+    committed to; neither is judged by reading the number and deciding.
+    """
+    factor, mapped = factor_for(statement)
+    if not mapped:
+        return None
+    if factor is not None:
+        return judge(history, factor, success, kill, args.min_adv, args.sessions)
+
+    study = next((v for k, v in STUDIED_BY.items() if statement.startswith(k)), None)
+    if study is None:
+        return Verdict(HypothesisStatus.OPEN, "no test exists for this")
+    return run_study(history, *study)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Close hypotheses against their own criteria")
     parser.add_argument(
@@ -212,26 +293,18 @@ def run(argv: list[str] | None = None) -> int:
 
         verdicts: list[tuple[uuid.UUID, str, HypothesisStatus, str]] = []
         for hypothesis_id, statement, success, kill in open_rows:
-            factor, mapped = factor_for(str(statement))
-            label = str(statement)[:52]
-
-            if not mapped:
-                print(f"  [ SKIP ] {label:<54} not a pre-registered question")
+            verdict = resolve_one(history, str(statement), success, kill, args)
+            if verdict is None:
+                print(f"  [ SKIP  ] {str(statement)[:52]:<54} not a pre-registered question")
                 continue
-            if factor is None:
-                print(f"  [ OPEN ] {label:<54} the factor lab cannot test this")
-                continue
-
-            verdict = judge(history, factor, success, kill, args.min_adv, args.sessions)
-            status, reason = verdict.status, verdict.reason
             mark = {
                 HypothesisStatus.CONFIRMED: "CONFIRM",
                 HypothesisStatus.REJECTED: "REJECT ",
                 HypothesisStatus.OPEN: " OPEN  ",
-            }[status]
-            print(f"  [{mark}] {label:<54} {reason}")
-            if status is not HypothesisStatus.OPEN:
-                verdicts.append((hypothesis_id, str(statement), status, reason))
+            }[verdict.status]
+            print(f"  [{mark}] {str(statement)[:52]:<54} {verdict.reason}")
+            if verdict.status is not HypothesisStatus.OPEN:
+                verdicts.append((hypothesis_id, str(statement), verdict.status, verdict.reason))
 
         print()
         print(RULE)

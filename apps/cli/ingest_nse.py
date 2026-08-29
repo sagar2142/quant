@@ -29,7 +29,14 @@ import httpx
 
 from core.clock import utc_now
 from core.config import settings
-from data.feeds.nse import BhavcopyFormatError, legacy_url, parse_bhavcopy, udiff_url
+from data.feeds.bse import BSE_SERIES, bse_udiff_url
+from data.feeds.nse import (
+    DEFAULT_SERIES,
+    BhavcopyFormatError,
+    legacy_url,
+    parse_bhavcopy,
+    udiff_url,
+)
 from data.store.panel import PanelStore
 
 SATURDAY = 5
@@ -63,13 +70,55 @@ def date_from_filename(name: str) -> date | None:
     return None
 
 
-def ingest_payload(panel: PanelStore, payload: bytes, session: date) -> int:
-    """Parse one bhavcopy and write it as a panel session."""
-    day = parse_bhavcopy(payload, session)
+#: BSE serves the file only to requests that look like they came from its own
+#: site; a bare fetch gets an HTML error page with a 200 status, which would
+#: otherwise parse as an empty session rather than fail.
+BSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (neutron)",
+    "Referer": "https://www.bseindia.com/",
+}
+
+
+def series_for(venue: str) -> tuple[str, ...]:
+    """Which security groups count as equity on this exchange."""
+    return BSE_SERIES if venue == "BSE" else DEFAULT_SERIES
+
+
+def source_url(session_date: date, venue: str) -> str:
+    """Where that exchange publishes the session's bhavcopy.
+
+    NSE changed layout in July 2024 and keeps both archives, so a backfill
+    crosses the boundary; BSE serves the current layout only, which is why a
+    BSE backfill cannot reach as far back.
+    """
+    if venue == "BSE":
+        return bse_udiff_url(session_date)
+    return udiff_url(session_date) if session_date >= UDIFF_FROM else legacy_url(session_date)
+
+
+def ingest_payload(
+    panel: PanelStore,
+    payload: bytes,
+    session: date,
+    venue: str = "NSE",
+    series: tuple[str, ...] = DEFAULT_SERIES,
+) -> int:
+    """Parse one bhavcopy and write it as a panel session.
+
+    Args:
+        venue: Prefixes the instrument id. A name listed on both exchanges
+            shares an ISIN and trades at two different prices, so the venue is
+            part of identity rather than a label — `BSE:INE002A01018` and
+            `NSE:INE002A01018` are different things to hold.
+        series: Which groups count as equity. NSE says `EQ`; BSE groups by
+            settlement history instead (A, B, T and the SME platforms), so the
+            NSE filter matches nothing in a BSE file.
+    """
+    day = parse_bhavcopy(payload, session, series=series)
     frame = day.bars.with_columns(
         [
             (
-                "NSE:"
+                f"{venue}:"
                 + day.bars["isin"].zip_with(
                     day.bars["isin"].str.len_chars() > 0, day.bars["symbol"]
                 )
@@ -114,12 +163,13 @@ def ingest_directory(panel: PanelStore, directory: Path) -> tuple[int, int]:
     return ok, failed
 
 
-def fetch_range(
+def fetch_range(  # noqa: PLR0913, PLR0917 - a date range, a venue, and how to pace it
     panel: PanelStore,
     start: date,
     end: date,
     pause: float,
     refetch: bool = False,
+    venue: str = "NSE",
 ) -> tuple[int, int]:
     """Fetch and ingest every session in [start, end].
 
@@ -130,7 +180,8 @@ def fetch_range(
     """
     have = set() if refetch else set(panel.sessions())
     ok = failed = skipped = 0
-    with httpx.Client(headers=NSE_HEADERS, timeout=30.0, follow_redirects=True) as client:
+    headers = BSE_HEADERS if venue == "BSE" else NSE_HEADERS
+    with httpx.Client(headers=headers, timeout=30.0, follow_redirects=True) as client:
         # Prime the session cookie; NSE rejects bare archive requests.
         try:
             client.get("https://www.nseindia.com/")
@@ -146,7 +197,7 @@ def fetch_range(
                 skipped += 1
                 day += timedelta(days=1)
                 continue  # no sleep: nothing was requested
-            url = udiff_url(day) if day >= UDIFF_FROM else legacy_url(day)
+            url = source_url(day, venue)
             try:
                 response = client.get(url)
                 if response.status_code != httpx.codes.OK:
@@ -154,7 +205,7 @@ def fetch_range(
                     print(f"{day}  HTTP {response.status_code} (holiday or unavailable)")
                     failed += 1
                 else:
-                    count = ingest_payload(panel, response.content, day)
+                    count = ingest_payload(panel, response.content, day, venue, series_for(venue))
                     print(f"{day}  {count:>5} rows")
                     ok += 1
             except (httpx.HTTPError, BhavcopyFormatError) as exc:
@@ -173,6 +224,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     source.add_argument("--from-dir", type=Path, help="Directory of downloaded files")
     source.add_argument("--start", type=date.fromisoformat, help="Fetch from this date")
     parser.add_argument("--end", type=date.fromisoformat, default=None)
+    parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help=(
+            "Which exchange to ingest. Written to a separate panel: the two "
+            "are different venues with different prices, not one merged tape."
+        ),
+    )
     parser.add_argument("--lake", default=None)
     parser.add_argument("--pause", type=float, default=1.0, help="Seconds between requests")
     parser.add_argument(
@@ -185,7 +245,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    panel = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    panel = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
 
     if args.from_dir is not None:
         if not args.from_dir.is_dir():
@@ -196,7 +256,9 @@ def run(argv: list[str] | None = None) -> int:
         status = 0 if ok else 1
     else:
         end = args.end or utc_now().date()
-        ok, failed = fetch_range(panel, args.start, end, args.pause, refetch=args.refetch)
+        ok, failed = fetch_range(
+            panel, args.start, end, args.pause, refetch=args.refetch, venue=args.venue
+        )
         # ok == 0 with no failures means the range was already covered — a
         # resumed run that finds nothing left to do has succeeded, not failed.
         status = 1 if failed and not ok else 0

@@ -237,6 +237,17 @@ CATALOGUE: tuple[Hypothesis, ...] = (
         standard_kill(),
     ),
     question(
+        "A signal is best traded on the horizon at which it predicts, not every session",
+        "Transaction costs are paid per trade; information arrives at the horizon the signal "
+        "measures. Cross-sectional momentum's IC rises monotonically with horizon — 0.0102 at "
+        "one day against 0.0409 at sixty-three — so a book that re-decides every session pays "
+        "roughly sixty-three times the costs for the same information. The counterparty is "
+        "whoever collects the spread on trades that carried no new view.",
+        "Rebalancing a 12-1 momentum book every 63 sessions beats rebalancing it daily, net",
+        {"net_cagr_vs_daily": "> 0", "sharpe_vs_daily": "> 0", "fees_paid": "< half of daily"},
+        {"net_cagr_vs_daily": "<= 0", "or_sharpe": "no better than daily"},
+    ),
+    question(
         "Proximity to the 52-week low is a distinct effect from proximity to the 52-week high",
         "The disposition effect makes holders reluctant to realise losses near lows, which is a "
         "different behaviour from the anchoring that slows adjustment near highs. If the two are "

@@ -50,6 +50,7 @@ from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.backtest import BacktestConfig, BacktestEngine
 from engine.experiments.recording import RunInputs, record_run
+from engine.experiments.registry import HypothesisStatus
 from engine.experiments.repository import ExperimentRepository, UnregisteredHypothesisError
 from engine.validation import GauntletInputs, run_gauntlet
 from engine.validation.generators import (
@@ -306,6 +307,14 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
             print(f"run not recorded: {exc}")
             return
 
+        # The gauntlet is stage 7 and the authority on confirmation: stage 3
+        # can reject a signal but never confirm one, so a hypothesis is closed
+        # positively here or not at all.
+        repository.resolve_hypothesis(
+            hypothesis.hypothesis_id,
+            HypothesisStatus.CONFIRMED if report.passed else HypothesisStatus.REJECTED,
+        )
+
         record = record_run(
             connection,
             RunInputs(
@@ -320,7 +329,9 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
             ),
             gauntlet=report,
         )
+    verdict = "CONFIRMED" if report.passed else "REJECTED"
     print(f"recorded: experiment {record.experiment_id}, trial count now {record.trials}")
+    print(f"hypothesis {args.hypothesis} resolved {verdict}")
 
 
 def run(argv: list[str] | None = None) -> int:
