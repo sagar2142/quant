@@ -152,3 +152,41 @@ class TestArchiveUrls:
 
     def test_udiff_url_shape(self):
         assert "20240315" in udiff_url(SESSION)
+
+
+class TestAWebPageIsNotABhavcopy:
+    """BSE answers 200 with its homepage for dates it does not have.
+
+    Every session before the UDiFF layout existed — anything earlier than 2024
+    — comes back as 14,287 bytes of HTML and a successful status code. Neither
+    a status check nor a size check separates that from a real file, so a
+    multi-year backfill would parse markup as CSV, match no series, and write
+    hundreds of empty sessions: a panel that reports as ingested and contains
+    nothing.
+    """
+
+    def test_html_is_refused_rather_than_parsed(self):
+        from apps.cli.ingest_nse import ingest_payload
+
+        page = b'<!DOCTYPE html><html lang="en"><head><title>BSE</title></head><body></body></html>'
+        with pytest.raises(BhavcopyFormatError, match="web page"):
+            ingest_payload(None, page, date(2023, 1, 2), "BSE")  # type: ignore[arg-type]
+
+    def test_leading_whitespace_does_not_smuggle_it_through(self):
+        from apps.cli.ingest_nse import looks_like_markup
+
+        assert looks_like_markup(b"\n\n   <!DOCTYPE html><html>")
+        assert looks_like_markup(b"  <html><body>hello</body></html>")
+
+    def test_a_real_bhavcopy_is_not_mistaken_for_markup(self):
+        from apps.cli.ingest_nse import looks_like_markup
+
+        assert not looks_like_markup(UDIFF_CSV)
+        assert not looks_like_markup(LEGACY_CSV)
+
+    def test_an_empty_body_is_left_to_the_parser(self):
+        """Not markup, so it falls through to the format error the parser
+        already raises — one failure mode, not two."""
+        from apps.cli.ingest_nse import looks_like_markup
+
+        assert not looks_like_markup(b"")

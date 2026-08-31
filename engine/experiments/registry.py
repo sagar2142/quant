@@ -45,6 +45,37 @@ __all__ = [
 #: enforcement, this is the fast feedback.
 MIN_MECHANISM_CHARS = 80
 
+#: Namespace for deriving a hypothesis id from its statement.
+HYPOTHESIS_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+#: Sentinel meaning "no id was supplied, derive one". A nil UUID rather than
+#: `None` so the field keeps a single type for every consumer.
+UNSET_ID = uuid.UUID(int=0)
+
+
+def hypothesis_id_for(statement: str) -> uuid.UUID:
+    """The id a statement always gets — MASTER_PLAN §5.1.
+
+    **This is why re-registering the catalogue is safe.** The id used to be a
+    fresh `uuid4` per instantiation, which meant the CATALOGUE was assigned new
+    ids on every import and `ensure_hypothesis`'s ON CONFLICT clause could
+    never fire. Running `preregister --register` a second time therefore
+    inserted a duplicate OPEN copy of every question, sitting beside the
+    resolved original — eleven REJECTED verdicts silently shadowed by eleven
+    fresh OPEN rows, and the M6/M7 rejection rate computed over a denominator
+    twice its true size.
+
+    A pre-registration ledger whose entries can be un-resolved by re-running a
+    command is not a ledger. Deriving the id from the statement makes the
+    statement the identity, so the second registration collides with the first
+    and does nothing — and a genuinely reworded question, which is a different
+    claim, correctly gets a different id.
+
+    Whitespace is normalised so that a reflowed line in the catalogue does not
+    read as a new hypothesis.
+    """
+    return uuid.uuid5(HYPOTHESIS_NAMESPACE, " ".join(statement.split()))
+
 
 class DataPeriod(str, Enum):
     DEVELOPMENT = "DEVELOPMENT"
@@ -95,7 +126,7 @@ class Hypothesis:
     test_start: date
     test_end: date
 
-    hypothesis_id: uuid.UUID = field(default_factory=uuid.uuid4)
+    hypothesis_id: uuid.UUID = field(default_factory=lambda: UNSET_ID)
     status: HypothesisStatus = HypothesisStatus.OPEN
     created_at: datetime = field(default_factory=utc_now)
 
@@ -105,6 +136,11 @@ class Hypothesis:
             raise MechanismTooThinError(len(mechanism))
         if not self.statement.strip():
             raise ValueError("statement cannot be empty")
+        if self.hypothesis_id == UNSET_ID:
+            # `object.__setattr__` because the dataclass is frozen, which is
+            # the point: the id is derived once at construction and cannot be
+            # reassigned afterwards any more than the statement can.
+            object.__setattr__(self, "hypothesis_id", hypothesis_id_for(self.statement))
         self._check_periods()
 
     def _check_periods(self) -> None:

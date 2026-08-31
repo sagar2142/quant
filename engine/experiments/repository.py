@@ -118,6 +118,15 @@ class ExperimentRepository(ResultsMixin):
         Idempotent because a standing hypothesis — the exploratory one in
         particular — is re-used across sessions. `register_hypothesis` stays
         strict: a genuine pre-registration should fail loudly if it collides.
+
+        **Conflicts on the statement, not the id, and returns the id that is
+        actually in the table.** Both halves were wrong and both mattered.
+        Deduplicating on the id could not work while ids were generated per
+        object, so re-registering the catalogue inserted a second OPEN copy of
+        every question beside its resolved original — see migration 005.
+        Returning the *supplied* id after a conflict was the subtler half: the
+        caller would hold an id no row has, and the foreign key would only say
+        so later, from somewhere else.
         """
         row = hypothesis.to_row()
         with self._conn.cursor() as cur:
@@ -129,7 +138,8 @@ class ExperimentRepository(ResultsMixin):
                     dev_start, dev_end, val_start, val_end, test_start, test_end,
                     status
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (hypothesis_id) DO NOTHING
+                ON CONFLICT (statement) DO NOTHING
+                RETURNING hypothesis_id
                 """,
                 [
                     row["hypothesis_id"],
@@ -147,7 +157,20 @@ class ExperimentRepository(ResultsMixin):
                     row["status"],
                 ],
             )
-        return hypothesis.hypothesis_id
+            inserted = cur.fetchone()
+            if inserted is not None:
+                return uuid.UUID(str(inserted[0]))
+
+            # Already registered. The row wins: an id minted here would not be
+            # the one the existing verdicts and trials hang off.
+            cur.execute(
+                "SELECT hypothesis_id FROM hypotheses WHERE statement = %s",
+                [row["statement"]],
+            )
+            existing = cur.fetchone()
+        if existing is None:  # pragma: no cover - the insert conflicted on it
+            raise LookupError(f"hypothesis vanished between insert and read: {row['statement']!r}")
+        return uuid.UUID(str(existing[0]))
 
     def ensure_dataset(self, dataset_id: str, name: str, source: str) -> str:
         """The parent row a dataset version hangs off. Idempotent."""
@@ -184,12 +207,16 @@ class ExperimentRepository(ResultsMixin):
         row, and reconstructing it by hand would let the recorded statement
         drift from the one that was actually registered — which is the whole
         point of registering it first (§5.1).
+
+        Returns the row's `status`, not the dataclass default. A REJECTED
+        hypothesis that reads back as OPEN is worse than an error, because
+        every caller downstream believes it.
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT statement, economic_mechanism, prediction, success_criteria, "
-                "kill_criteria, dev_start, dev_end, val_start, val_end, test_start, test_end "
-                "FROM hypotheses WHERE hypothesis_id = %s",
+                "kill_criteria, dev_start, dev_end, val_start, val_end, test_start, test_end, "
+                "status FROM hypotheses WHERE hypothesis_id = %s",
                 [str(hypothesis_id)],
             )
             found = cur.fetchone()
@@ -208,6 +235,11 @@ class ExperimentRepository(ResultsMixin):
             test_start=found[9],
             test_end=found[10],
             hypothesis_id=hypothesis_id,
+            # Read from the row rather than left at the dataclass default.
+            # Omitting it meant every hypothesis loaded back as OPEN however it
+            # had been resolved — a caller checking whether a claim was already
+            # rejected was told, in good faith, that it was still open.
+            status=HypothesisStatus(found[11]),
         )
 
     def resolve_hypothesis(self, hypothesis_id: uuid.UUID, status: HypothesisStatus) -> None:

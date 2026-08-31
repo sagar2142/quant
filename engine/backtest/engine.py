@@ -167,6 +167,12 @@ class BacktestEngine:
             marks = self._marks(history, decision_ts)
             last_marks.update(marks)
 
+            # Charged before the bar is valued, so the cost of carrying a short
+            # lands on the session it was carried through. One session per bar:
+            # a book held without trading still pays, which is the whole point
+            # of pricing time rather than transactions.
+            self._charge_borrow(portfolio, last_marks)
+
             # Recorded *before* this bar's orders execute, and that ordering is
             # the whole point. Orders placed here fill on bar T+1, and appending
             # afterwards booked the resulting position into the row stamped T
@@ -176,6 +182,14 @@ class BacktestEngine:
             # row for T+1, valued at T+1's close, where it happened.
             state.equity.append(self._equity_row(decision_ts, portfolio, last_marks))
             if index + 1 < lookback:
+                continue
+
+            # Between rebalances the book is held, not re-decided. Skipping
+            # the strategy entirely rather than planning and discarding: a
+            # threshold-filtered no-op still pays the planner's rounding, and
+            # over a long run those add up to a position the signal never
+            # asked for.
+            if (index - lookback) % max(1, self.config.rebalance_every) != 0:
                 continue
 
             view = self._build_view(history, decision_ts, universe, partition)
@@ -237,6 +251,27 @@ class BacktestEngine:
             universe=universe,
             partition=partition,
         )
+
+    def _charge_borrow(self, portfolio: Portfolio, marks: dict[InstrumentId, Decimal]) -> None:
+        """Deduct one session of borrow on every open short.
+
+        Valued at last-seen marks, like everything else in the loop: a short in
+        a name that stopped printing still has to be borrowed.
+
+        A long-only run does no arithmetic here at all — the loop body never
+        executes, because nothing is short — so this cannot change any result
+        already measured.
+        """
+        shorts = {
+            instrument_id: position.market_value(marks[instrument_id])
+            for instrument_id, position in portfolio.open_positions().items()
+            if position.is_short and instrument_id in marks
+        }
+        if not shorts:
+            return
+        charge = self.market.borrow.session_charge(shorts)
+        if charge > 0:
+            portfolio.apply_funding(charge)
 
     @staticmethod
     def _marks(history: pl.DataFrame, timestamp: datetime) -> dict[InstrumentId, Decimal]:

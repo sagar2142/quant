@@ -13,16 +13,20 @@ nothing else measured by this engine means anything.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import numpy as np
 import polars as pl
 import pytest
 
 from core.clock import UTC, as_decision_time
 from core.instruments import AssetClass, Currency, Exchange, Instrument, InstrumentId
+from engine.accounting import Portfolio
 from engine.backtest.engine import BacktestConfig, BacktestEngine, MarketModel
 from engine.backtest.fills import NextOpenFill
+from engine.costs.borrow import BorrowModel
 from engine.costs.india import NseEquityCostModel
 from engine.costs.model import ScaledCostModel
 from engine.costs.slippage import SlippageModel
@@ -66,7 +70,12 @@ def history(closes: list[float], instrument_id: InstrumentId = IID) -> pl.DataFr
     )
 
 
-def engine(strategy: Strategy, cost_multiplier: Decimal = Decimal(1), **cfg) -> BacktestEngine:
+def engine(
+    strategy: Strategy,
+    cost_multiplier: Decimal = Decimal(1),
+    borrow: BorrowModel | None = None,
+    **cfg,
+) -> BacktestEngine:
     base = NseEquityCostModel(slippage=NO_SLIPPAGE)
     model = base if cost_multiplier == 1 else ScaledCostModel(base, cost_multiplier)
     return BacktestEngine(
@@ -75,6 +84,7 @@ def engine(strategy: Strategy, cost_multiplier: Decimal = Decimal(1), **cfg) -> 
             cost_model=model,
             fill_model=NextOpenFill(model),
             instruments=INSTRUMENTS,
+            borrow=borrow or BorrowModel(),
         ),
         config=BacktestConfig(**cfg),
     )
@@ -382,3 +392,126 @@ class TestEquityIsStampedWhenItHappened:
     def test_the_curve_has_one_row_per_bar(self):
         result = self.run(100.0)
         assert result.equity_curve.height == 8
+
+
+class TestRebalanceFrequency:
+    """Costs are paid per trade; information arrives at the horizon the signal
+    measures. The engine could only re-decide every bar, so a signal whose IC
+    peaks at 63 days was traded daily — paying transaction costs at many times
+    the rate its information refreshed.
+    """
+
+    def data(self, sessions: int = 200) -> pl.DataFrame:
+        rng = np.random.default_rng(4)
+        frames = []
+        for i in range(6):
+            closes = list(100.0 * np.exp(np.cumsum(rng.normal((i - 3) * 0.001, 0.012, sessions))))
+            frames.append(history(closes, InstrumentId(f"NSE:INE{i:03d}")))
+        return pl.concat(frames)
+
+    def run(self, every: int):
+        instruments = {
+            InstrumentId(f"NSE:INE{i:03d}"): INSTRUMENT.model_copy(
+                update={"instrument_id": InstrumentId(f"NSE:INE{i:03d}"), "symbol": f"N{i}"}
+            )
+            for i in range(6)
+        }
+        model = NseEquityCostModel(slippage=NO_SLIPPAGE)
+        return BacktestEngine(
+            strategy=SmaCrossover(fast=5, slow=10),
+            market=MarketModel(
+                cost_model=model, fill_model=NextOpenFill(model), instruments=instruments
+            ),
+            config=BacktestConfig(rebalance_every=every),
+        ).run(self.data(), universe=tuple(instruments))
+
+    def test_rebalancing_less_often_trades_less(self):
+        assert self.run(21).orders_filled < self.run(1).orders_filled
+
+    def test_rebalancing_less_often_costs_less(self):
+        daily = self.run(1).equity_curve["fees_paid"][-1]
+        monthly = self.run(21).equity_curve["fees_paid"][-1]
+        assert monthly < daily
+
+    def test_daily_is_the_default(self):
+        """The behaviour every existing result was produced under."""
+        assert BacktestConfig().rebalance_every == 1
+
+    def test_the_curve_still_covers_every_bar(self):
+        """Holding between rebalances is not the same as stopping: the book is
+        still marked every session, or a drawdown between decisions would be
+        invisible."""
+        held = self.run(21)
+        daily = self.run(1)
+        assert held.equity_curve.height == daily.equity_curve.height
+
+    def test_zero_is_treated_as_daily_rather_than_dividing_by_it(self):
+        assert self.run(0).orders_filled == self.run(1).orders_filled
+
+
+class TestBorrowIsChargedForTime:
+    """A short pays to be held, not to be traded — MASTER_PLAN §7.3.
+
+    The engine could build market-neutral books before this existed, and every
+    one of them financed its short leg for free. That is not a small error in a
+    known direction; it is an unknown one, because the rate depends on names
+    the signal happened to pick.
+    """
+
+    def test_a_long_only_run_is_bit_for_bit_unchanged(self):
+        """Load-bearing. Every result already measured is long-only, so if this
+        fails, adding borrow costs silently invalidated the entire record."""
+        prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        free = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal(0)))
+        charged = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal("0.25")))
+
+        one = free.run(history(prices))
+        two = charged.run(history(prices))
+
+        assert one.equity_curve["equity"].to_list() == two.equity_curve["equity"].to_list()
+        assert one.final_portfolio.fees_paid == two.final_portfolio.fees_paid
+
+    def test_a_short_pays_every_session_it_is_held(self):
+        held = Portfolio(cash=Decimal(1_000_000))
+        held.positions[IID] = replace(held.position(IID), quantity=Decimal(-100))
+        model = BorrowModel(annual_rate=Decimal("0.252"))  # 0.1% per session
+        engine_ = engine(BuyAndHold(), borrow=model)
+
+        marks = {IID: Decimal(1000)}
+        before = held.cash
+        engine_._charge_borrow(held, marks)
+        one_session = before - held.cash
+
+        engine_._charge_borrow(held, marks)
+        engine_._charge_borrow(held, marks)
+        assert before - held.cash == one_session * 3
+
+    def test_the_charge_lands_in_fees_not_in_thin_air(self):
+        """Cash out must equal fees recorded, or the equity curve and the fee
+        total tell two different stories about the same run."""
+        held = Portfolio(cash=Decimal(1_000_000))
+        held.positions[IID] = replace(held.position(IID), quantity=Decimal(-100))
+        engine_ = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal("0.252")))
+
+        before_cash, before_fees = held.cash, held.fees_paid
+        engine_._charge_borrow(held, {IID: Decimal(1000)})
+
+        assert before_cash - held.cash == held.fees_paid - before_fees
+        assert held.fees_paid > before_fees
+
+    def test_a_name_with_no_mark_is_skipped_not_guessed(self):
+        """A short in a suspended name still has to be borrowed, but pricing it
+        off nothing would invent the number (§14.1.5)."""
+        held = Portfolio(cash=Decimal(1_000_000))
+        held.positions[IID] = replace(held.position(IID), quantity=Decimal(-100))
+        engine_ = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal("0.25")))
+
+        before = held.cash
+        engine_._charge_borrow(held, {})
+        assert held.cash == before
+
+    def test_a_flat_book_pays_nothing(self):
+        flat = Portfolio(cash=Decimal(1_000_000))
+        engine_ = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal("0.25")))
+        engine_._charge_borrow(flat, {IID: Decimal(1000)})
+        assert flat.cash == Decimal(1_000_000)

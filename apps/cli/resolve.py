@@ -35,17 +35,21 @@ import argparse
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import date
 
 import polars as pl
 
-from apps.cli.backtest import load_panel
+from apps.cli.backtest import build_universe, load_panel, nse_instrument
 from apps.cli.factor import ROUND_TRIP_COST
+from apps.cli.runs import Panel, run_cadence
 from core.config import settings
+from core.instruments import InstrumentId
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.experiments.registry import HypothesisStatus
 from engine.experiments.repository import ExperimentRepository
 from ops.db import optional_connection
+from quant.math.metrics.performance import cagr, sharpe_ratio
 from quant.research.factors import (
     FORWARD_HORIZONS,
     Factor,
@@ -74,6 +78,25 @@ STUDIED_BY: dict[str, tuple[str, str]] = {
     "The illiquidity premium survives": ("double_sorted_ic", "positive"),
 }
 
+#: The two questions that are about *portfolio construction* rather than about
+#: ranking, and the cadence each one committed to.
+#:
+#: Neither can be answered by a cross-sectional IC, because neither is a claim
+#: about which names to hold — both hold exactly the same names as a daily book
+#: and differ only in how often that book is re-decided. Judging them on a
+#: factor score would return the same number for both arms and resolve nothing.
+#:
+#: The window matters and is part of the mapping. The 63-session question was
+#: registered before anything had been measured, so development data is
+#: legitimate evidence for it. The 21-session question was not: it came out of
+#: an exploratory sweep, its dev result is already known, and it was registered
+#: as confirmatory on that basis. Judging it on dev data would be scoring an
+#: answer against the data that produced it.
+CADENCE_BY: dict[str, tuple[int, str]] = {
+    "A signal is best traded on the horizon": (63, "dev"),
+    "A monthly rebalance is the horizon": (21, "val"),
+}
+
 TESTED_BY: dict[str, Factor | None] = {
     "Overnight returns and intraday returns": Factor.OVERNIGHT_MOMENTUM,
     "Average trade size predicts": Factor.AVG_TRADE_SIZE,
@@ -90,7 +113,25 @@ TESTED_BY: dict[str, Factor | None] = {
     "The illiquidity premium survives": None,  # double sort on size
     "Downside-to-upside volatility asymmetry": Factor.SEMI_DEVIATION_RATIO,
     "Proximity to the 52-week low": Factor.LOW_52W_PROXIMITY,
+    "A signal is best traded on the horizon": None,  # cadence, not selection
+    "A monthly rebalance is the horizon": None,  # cadence, not selection
 }
+
+#: The momentum configuration both cadence questions were registered about:
+#: twelve-month lookback, one-month skip. Fixed rather than swept, because a
+#: cadence question that also swept the lookback would be two questions.
+LOOKBACK = 252
+SKIP = 21
+
+#: Below this, a window is too short for a 21- or 63-session cadence to have
+#: rebalanced enough times to mean anything. Reported as OPEN rather than
+#: rejected: too little data is not evidence against a claim.
+MIN_CADENCE_SESSIONS = 250
+
+#: How many names the cadence comparison trades. Matched to the gauntlet's
+#: default so a hypothesis that clears here is handed to a stage that measures
+#: the same book, not a wider or narrower one.
+CADENCE_UNIVERSE = 200
 
 #: Significance floor every hypothesis in the catalogue committed to. Uniform
 #: on purpose: a threshold tuned per idea is a threshold tuned to the answer.
@@ -184,6 +225,96 @@ def judge(  # noqa: PLR0913, PLR0917 - a hypothesis, its criteria, and the data 
     return Verdict(HypothesisStatus.OPEN, reason)
 
 
+#: The registered split (§5.3). Duplicated from the pre-registration catalogue
+#: rather than imported, because the windows a hypothesis was registered under
+#: must not follow a later edit to that file — the whole point of §5.1 is that
+#: the goalposts cannot move after the fact.
+CADENCE_WINDOWS: dict[str, tuple[date, date]] = {
+    "dev": (date(2019, 1, 1), date(2023, 12, 31)),
+    "val": (date(2024, 1, 1), date(2025, 6, 30)),
+}
+
+
+def cadence_panel(span: pl.DataFrame, args: argparse.Namespace) -> Panel | None:
+    """A tradable panel over one registered window.
+
+    The universe is built from the whole store rather than from the window, so
+    membership stays point-in-time correct: restricting it to names that traded
+    inside the window would select on having survived it.
+    """
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    universe = build_universe(store, CADENCE_UNIVERSE)
+    if not universe:
+        return None
+    symbols = dict(span.select("instrument_id", "symbol").unique().iter_rows())
+    instruments = {InstrumentId(i): nse_instrument(i, symbols.get(i, i)) for i in universe}
+    return Panel(history=span, instruments=instruments, universe=universe)
+
+
+def run_cadence_study(  # noqa: PLR0913, PLR0917 - a hypothesis, its cadence, and the data
+    history: pl.DataFrame,
+    every: int,
+    window: str,
+    success: dict[str, object],
+    kill: dict[str, object],
+    args: argparse.Namespace,
+) -> Verdict:
+    """Two backtests, identical but for how often the book is re-decided.
+
+    The comparison is the measurement. Sharpe alone would not resolve either
+    hypothesis, because both predicted a fee saving *and* an improvement — a
+    cadence that halved fees while halving return has not beaten a daily book,
+    and one that improved Sharpe while paying the same fees did not do it for
+    the reason claimed.
+
+    Rejection is the default. A cadence that fails either arm of its own
+    prediction is closed, and one that merely ties is closed too: "no worse
+    than daily" was not what was registered, and treating a tie as support is
+    how a null result becomes a finding.
+    """
+    start, end = CADENCE_WINDOWS[window]
+    span = history.filter(
+        (pl.col("event_time").dt.date() >= start) & (pl.col("event_time").dt.date() <= end)
+    )
+    sessions = span["event_time"].n_unique()
+    if sessions < MIN_CADENCE_SESSIONS:
+        return Verdict(HypothesisStatus.OPEN, f"{window} window has only {sessions} sessions")
+
+    panel = cadence_panel(span, args)
+    if panel is None:
+        return Verdict(HypothesisStatus.OPEN, "universe is empty in this window")
+
+    daily = run_cadence(panel, LOOKBACK, SKIP, 1)
+    tested = run_cadence(panel, LOOKBACK, SKIP, every)
+    if daily.returns.size == 0 or tested.returns.size == 0:
+        return Verdict(HypothesisStatus.OPEN, "no equity curve — nothing traded")
+
+    d_sharpe, t_sharpe = sharpe_ratio(daily.returns), sharpe_ratio(tested.returns)
+    d_cagr, t_cagr = cagr(daily.returns), cagr(tested.returns)
+    reason = (
+        f"{every}d vs daily on {window} ({sessions} sessions): "
+        f"sharpe {t_sharpe:+.2f} vs {d_sharpe:+.2f}, "
+        f"cagr {t_cagr:+.2%} vs {d_cagr:+.2%}, "
+        f"fees {tested.fees:,.0f} vs {daily.fees:,.0f}"
+    )
+
+    beat_sharpe = t_sharpe > d_sharpe
+    beat_cagr = t_cagr > d_cagr
+    halved_fees = tested.fees < daily.fees / 2
+
+    if not (beat_sharpe and beat_cagr):
+        return Verdict(HypothesisStatus.REJECTED, f"{reason} — did not beat daily")
+    if not halved_fees:
+        return Verdict(
+            HypothesisStatus.REJECTED, f"{reason} — beat daily, but not by saving fees as claimed"
+        )
+
+    # Beating a daily book on one window is not permission to trade it. The
+    # gauntlet is the next stage, exactly as for a factor that clears stage 3.
+    _ = (success, kill)
+    return Verdict(HypothesisStatus.OPEN, f"{reason} — clears its own criteria, needs the gauntlet")
+
+
 def run_study(history: pl.DataFrame, name: str, predicted: str) -> Verdict:
     """Run one of the four studies and judge it against its own prediction.
 
@@ -242,6 +373,10 @@ def resolve_one(
         return None
     if factor is not None:
         return judge(history, factor, success, kill, args.min_adv, args.sessions)
+
+    cadence = next((v for k, v in CADENCE_BY.items() if statement.startswith(k)), None)
+    if cadence is not None:
+        return run_cadence_study(history, *cadence, success, kill, args)
 
     study = next((v for k, v in STUDIED_BY.items() if statement.startswith(k)), None)
     if study is None:

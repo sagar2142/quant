@@ -26,10 +26,11 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
+import polars as pl
 
 from core.clock import utc_now
 from core.config import settings
-from data.feeds.bse import BSE_SERIES, bse_udiff_url
+from data.feeds.bse import BSE_SERIES, T0_SUFFIX, bse_udiff_url
 from data.feeds.nse import (
     DEFAULT_SERIES,
     BhavcopyFormatError,
@@ -96,6 +97,29 @@ def source_url(session_date: date, venue: str) -> str:
     return udiff_url(session_date) if session_date >= UDIFF_FROM else legacy_url(session_date)
 
 
+#: How much of a body to sniff for markup. A bhavcopy's header is the first
+#: line; anything claiming to be one has declared itself well before this.
+SNIFF_BYTES = 512
+
+
+def looks_like_markup(payload: bytes) -> bool:
+    """Whether this is a web page pretending to be a bhavcopy.
+
+    **BSE answers 200 for dates it does not have.** Ask for a session before
+    the UDiFF layout existed — anything earlier than 2024 — and it returns its
+    homepage, 14,287 bytes of HTML, with a perfectly successful status code. A
+    status check cannot catch that, and neither can a length check, because the
+    page is bigger than a thin holiday file would be.
+
+    Left unguarded a multi-year BSE backfill does not fail. It walks the whole
+    range, parses HTML as CSV, matches no series, and writes a few hundred
+    sessions containing nothing — a panel that looks ingested and has no data
+    in it, which is the failure mode this codebase is most concerned with.
+    """
+    head = payload[:SNIFF_BYTES].lstrip().lower()
+    return head.startswith((b"<!doctype", b"<html")) or b"<html" in head
+
+
 def ingest_payload(
     panel: PanelStore,
     payload: bytes,
@@ -114,14 +138,21 @@ def ingest_payload(
             settlement history instead (A, B, T and the SME platforms), so the
             NSE filter matches nothing in a BSE file.
     """
+    if looks_like_markup(payload):
+        raise BhavcopyFormatError(
+            f"{venue} returned a web page rather than a bhavcopy for {session} "
+            "— the archive does not have this session"
+        )
     day = parse_bhavcopy(payload, session, series=series)
-    frame = day.bars.with_columns(
+    bars = day.bars
+    if venue == "BSE":
+        # Same ISIN, different settlement cycle — see `is_parallel_settlement`.
+        bars = bars.filter(~pl.col("symbol").str.ends_with(T0_SUFFIX))
+    frame = bars.with_columns(
         [
             (
                 f"{venue}:"
-                + day.bars["isin"].zip_with(
-                    day.bars["isin"].str.len_chars() > 0, day.bars["symbol"]
-                )
+                + bars["isin"].zip_with(bars["isin"].str.len_chars() > 0, bars["symbol"])
             ).alias("instrument_id")
         ]
     ).select(

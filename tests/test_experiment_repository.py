@@ -16,6 +16,7 @@ import pytest
 
 from core.clock import UTC
 from engine.experiments.registry import (
+    UNSET_ID,
     DataPeriod,
     ExperimentRecord,
     Hypothesis,
@@ -94,6 +95,75 @@ def dataset_version(repo, db):
             storage_uri="file:///lake/nse",
         )
     )
+
+
+class TestIdentity:
+    """A statement IS the hypothesis — MASTER_PLAN §5.1.
+
+    This class exists because of a real bug, not a hypothetical one. Ids were
+    minted per Python object, so the pre-registration catalogue got fresh ids
+    on every import and `ensure_hypothesis` could never deduplicate. Running
+    `preregister --register` twice inserted a second OPEN copy of every
+    question beside its resolved original: eleven REJECTED verdicts shadowed,
+    and the M6/M7 rejection rate computed over twice its true denominator.
+
+    Nothing raised. The ledger simply stopped meaning what it said.
+    """
+
+    def test_the_same_statement_always_gets_the_same_id(self):
+        assert make_hypothesis().hypothesis_id == make_hypothesis().hypothesis_id
+
+    def test_a_reflowed_statement_is_still_the_same_hypothesis(self):
+        """Whitespace normalised: rewrapping a line in the catalogue must not
+        read as a new claim."""
+        from dataclasses import replace
+
+        one = make_hypothesis()
+        reflowed = replace(
+            one,
+            statement="Index rebalance\n   pressure   reverts",
+            hypothesis_id=UNSET_ID,
+        )
+        assert reflowed.hypothesis_id == one.hypothesis_id
+
+    def test_a_different_statement_is_a_different_hypothesis(self):
+        from dataclasses import replace
+
+        one = make_hypothesis()
+        other = replace(one, statement="Something else entirely", hypothesis_id=UNSET_ID)
+        assert other.hypothesis_id != one.hypothesis_id
+
+    def test_an_explicit_id_is_still_honoured(self):
+        """The exploratory hypothesis supplies its own; deriving over the top
+        of a caller's id would break every row already keyed on it."""
+        from dataclasses import replace
+
+        chosen = uuid.uuid4()
+        assert replace(make_hypothesis(), hypothesis_id=chosen).hypothesis_id == chosen
+
+    def test_re_registering_cannot_resurrect_a_resolved_hypothesis(self, repo):
+        """The bug, stated as a test.
+
+        A REJECTED verdict must survive the catalogue being registered again.
+        If this fails, a verdict can be un-made by re-running a command, and
+        the rejection rate the M6/M7 gate reads is fiction.
+        """
+        hid = repo.ensure_hypothesis(make_hypothesis())
+        repo.resolve_hypothesis(hid, HypothesisStatus.REJECTED)
+
+        again = repo.ensure_hypothesis(make_hypothesis())
+
+        assert again == hid, "a second registration must not mint a second row"
+        assert repo.hypothesis(hid).status is HypothesisStatus.REJECTED
+
+    def test_ensure_returns_the_id_that_is_actually_stored(self, repo):
+        """Not the one it was handed. A caller given an id no row has would
+        only find out later, from a foreign key, somewhere else."""
+        from dataclasses import replace
+
+        stored = repo.ensure_hypothesis(make_hypothesis())
+        impostor = replace(make_hypothesis(), hypothesis_id=uuid.uuid4())
+        assert repo.ensure_hypothesis(impostor) == stored
 
 
 class TestHypotheses:

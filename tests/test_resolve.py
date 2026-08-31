@@ -77,7 +77,22 @@ class TestMapping:
             assert mapped, hypothesis.statement
 
     def test_the_untestable_ones_are_declared_rather_than_guessed(self):
-        assert sum(1 for v in TESTED_BY.values() if v is None) == 4
+        """A `None` says the factor lab cannot express the question — it does
+        not say the question goes unanswered.
+
+        Asserting the route rather than a count. The count was four when four
+        studies existed and became stale the moment a cadence comparison was
+        added; what actually has to hold is that every question the lab cannot
+        score is picked up by something that can, or it is silently OPEN for
+        ever.
+        """
+        from apps.cli.resolve import CADENCE_BY, STUDIED_BY
+
+        unmappable = [k for k, v in TESTED_BY.items() if v is None]
+        assert unmappable, "the marker is load-bearing; something should be using it"
+        for prefix in unmappable:
+            routed = any(prefix.startswith(k) for k in (*STUDIED_BY, *CADENCE_BY))
+            assert routed, f"{prefix} has no test at all"
 
 
 class TestJudgement:

@@ -36,8 +36,10 @@ from datetime import date
 
 __all__ = [
     "BSE_SERIES",
+    "T0_SUFFIX",
     "bse_instrument_id",
     "bse_udiff_url",
+    "is_parallel_settlement",
 ]
 
 #: Equity groups on BSE. Settlement and surveillance categories rather than
@@ -79,3 +81,30 @@ def bse_instrument_id(isin: str, symbol: str) -> str:
     session, which is not a strategy anyone can trade.
     """
     return f"BSE:{isin}" if isin else f"BSE:{symbol.upper()}"
+
+
+#: BSE marks the T+0 settlement copy of a scrip by suffixing its ticker.
+#:
+#: The optional T+0 rolling settlement segment opened on 2024-03-28, and from
+#: that session the bhavcopy carries a second row for each participating name:
+#: same ISIN, same close, a handful of shares traded. `INDHOTEL` printed
+#: 167,607 shares that day and `INDHOTEL#` printed one.
+T0_SUFFIX = "#"
+
+
+def is_parallel_settlement(symbol: str) -> bool:
+    """Whether this row is the T+0 copy of a security listed elsewhere in the file.
+
+    **Same ISIN means same security.** The suffixed row is not another
+    instrument; it is the same one settling on a different cycle, which is why
+    including it puts two rows with one identity into a cross-section that must
+    carry each name once. The panel store refuses that outright — correctly —
+    and the backfill stopped dead at 2024-03-28 rather than quietly writing a
+    doubled session.
+
+    Dropping the T+0 copy rather than the ordinary one is deliberate: T+0 is a
+    thin parallel market whose volume is a rounding error against the main
+    book, so keeping it would misreport the liquidity of every name in it. The
+    day this system trades T+0 it needs its own venue, not a shared identity.
+    """
+    return symbol.endswith(T0_SUFFIX)

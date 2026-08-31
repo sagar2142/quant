@@ -38,6 +38,7 @@ __all__ = [
     "SWEEP_LOOKBACK",
     "SWEEP_SKIP",
     "SWEEP_TOP_FRACTION",
+    "CadenceResult",
     "Panel",
     "SweepTooShortError",
     "build_market",
@@ -47,6 +48,7 @@ __all__ = [
     "factor_placebo_runner",
     "factor_scores",
     "placebo_runner",
+    "run_cadence",
     "run_factor",
     "run_one",
     "run_strategy",
@@ -133,6 +135,46 @@ def run_one(
             lookback_bars=lookback, skip_bars=skip, top_fraction=MOMENTUM_TOP_FRACTION
         ),
         cost_multiple,
+    )
+
+
+@dataclass(frozen=True)
+class CadenceResult:
+    """One rebalance cadence, measured on the things its hypothesis named.
+
+    Fees are carried alongside the returns because the whole claim is about
+    them: a cadence question that reported only Sharpe would be judged on half
+    of what it predicted.
+    """
+
+    returns: npt.NDArray[np.float64]
+    fees: Decimal
+    orders_filled: int
+
+
+def run_cadence(panel: Panel, lookback: int, skip: int, every: int) -> CadenceResult:
+    """The same momentum book, re-decided every `every` sessions.
+
+    Only the cadence changes. Same lookback, same skip, same universe, same
+    costs, same starting cash — so a difference in the outcome is attributable
+    to how often the book was re-decided and to nothing else. That is the
+    entire content of the two rebalance hypotheses, and running them any other
+    way would answer a question neither of them asked.
+    """
+    engine = BacktestEngine(
+        strategy=CrossSectionalMomentum(
+            lookback_bars=lookback, skip_bars=skip, top_fraction=MOMENTUM_TOP_FRACTION
+        ),
+        market=build_market(panel.instruments),
+        config=BacktestConfig(initial_cash=Decimal(1_000_000), rebalance_every=every),
+    )
+    result = engine.run(panel.history, universe=panel.universe)
+    if result.equity_curve.is_empty():
+        return CadenceResult(np.array([], dtype=np.float64), Decimal(0), 0)
+    return CadenceResult(
+        returns=returns_from_equity(result.equity_curve["equity"].to_list()),
+        fees=result.final_portfolio.fees_paid,
+        orders_filled=result.orders_filled,
     )
 
 

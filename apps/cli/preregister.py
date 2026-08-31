@@ -257,7 +257,50 @@ CATALOGUE: tuple[Hypothesis, ...] = (
         standard_success(),
         standard_kill(),
     ),
+    # The one confirmatory question in the catalogue, flagged as such because
+    # its development-window answer is ALREADY KNOWN and therefore is not
+    # evidence for it. See CONFIRMATORY below.
+    question(
+        "A monthly rebalance is the horizon at which momentum pays, where a quarterly one is not",
+        "Rebalancing at sixty-three sessions was registered and rejected: the book drifted so far "
+        "from the signal between decisions that it stopped tracking it, and the fee saving did "
+        "not pay for the tracking error. Twenty-one sessions is the shorter arm of the same "
+        "trade-off — long enough that costs fall by most of the way, short enough that the book "
+        "still holds what the signal ranks. The counterparty is unchanged: whoever collects the "
+        "spread on daily trades that carried no new view.",
+        "A 21-session rebalance beats daily on validation data, having already beaten it in dev",
+        {
+            "val_sharpe_vs_daily": "> 0",
+            "val_net_cagr_vs_daily": "> 0",
+            "fees_paid": "< half of daily",
+            "basis": "VALIDATION WINDOW ONLY — the dev result is excluded, see CONFIRMATORY",
+        },
+        {
+            "val_sharpe_vs_daily": "<= 0",
+            "or_val_net_cagr": "<= 0",
+            "note": "a dev-only win does not resolve this either way",
+        },
+    ),
 )
+
+#: **One hypothesis above is confirmatory, not exploratory, and says so.**
+#:
+#: The 21-session rebalance was not conceived in ignorance. It surfaced from an
+#: exploratory sweep run after the 63-session hypothesis was rejected, and in
+#: the development window it beat a daily rebalance on every dimension measured
+#: — Sharpe 1.84 against 1.77, fees 119,638 against 504,659. Registering that
+#: as though the answer were unknown would be back-registration, which is the
+#: exact failure §5.1 exists to prevent.
+#:
+#: So it is registered with the development window explicitly spent. Its success
+#: and kill criteria name the *validation* window, which has not been used for
+#: this question, and the dev result is written into the mechanism rather than
+#: hidden — a reader can see where the idea came from and discount it
+#: accordingly. It still burns a trial, because a confirmatory test is a test.
+#:
+#: This is the honest form of "we found something while looking at something
+#: else". The dishonest form is the same idea with the provenance deleted.
+CONFIRMATORY: frozenset[str] = frozenset({CATALOGUE[-1].statement})
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

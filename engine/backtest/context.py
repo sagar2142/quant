@@ -17,6 +17,7 @@ from core.instruments import Instrument, InstrumentId
 from data.corpactions.actions import CorporateActionBook
 from engine.accounting import Portfolio
 from engine.backtest.fills import FillModel
+from engine.costs.borrow import BorrowModel
 from engine.costs.model import CostModel
 
 __all__ = [
@@ -47,6 +48,13 @@ class MarketModel:
     fill_model: FillModel
     instruments: dict[InstrumentId, Instrument]
     actions: CorporateActionBook = field(default_factory=lambda: CorporateActionBook([]))
+    #: What a short costs to *hold*, charged per session rather than per trade.
+    #:
+    #: Defaults to a model at the standard rate rather than to nothing, because
+    #: nothing is the wrong answer: a long-only book pays zero either way, and
+    #: a long-short book that pays zero is not a book anyone could hold. A
+    #: caller that knows its real borrow rates should supply them.
+    borrow: BorrowModel = field(default_factory=BorrowModel)
 
 
 @dataclass(frozen=True)
@@ -59,6 +67,17 @@ class BacktestConfig:
     #: Skip rebalancing a name whose target differs from its holding by less
     #: than this fraction of NAV (§7.1).
     rebalance_threshold: Decimal = Decimal("0.005")
+    #: Sessions between rebalances. 1 re-decides every bar, which is the
+    #: default and was until now the only option.
+    #:
+    #: **Costs are paid per trade; information arrives at the horizon the
+    #: signal measures.** Cross-sectional momentum's IC rises monotonically
+    #: with horizon — 0.0102 at one day against 0.0409 at sixty-three — so a
+    #: book re-deciding every session pays roughly sixty-three times the costs
+    #: for the same view. Holding the target weights between rebalances is not
+    #: a smaller version of trading daily; it is trading the horizon the signal
+    #: actually predicts over.
+    rebalance_every: int = 1
     min_order_value: Decimal = MIN_ORDER_VALUE
     allow_partial_fills: bool = True
     #: Cash held back when sizing buys, covering fees and the gap between the
