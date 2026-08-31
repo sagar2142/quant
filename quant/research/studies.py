@@ -115,6 +115,26 @@ def gap_reversion(panel: pl.DataFrame) -> StudyResult:
     and this system trades daily bars.
 
     A negative correlation means gaps fade, which is the registered prediction.
+
+    **Read the result knowing this statistic is not identified from daily
+    bars.** `open` appears in the gap with a plus sign and in the intraday
+    return with a minus sign, so any pricing error in the recorded open — an
+    opening-auction print, a wide spread on a mid-cap, a stale quote — lands in
+    the two series with opposite signs and manufactures negative correlation
+    out of a market that has none.
+
+    It is not a small effect. Simulating a market with *zero* gap reversion and
+    adding noise to the recorded open alone produces t = -15.6 at 0.5% noise
+    and t = -54.6 at 1%. The measured value on the NSE panel is -0.2180 at
+    t = -117.6, which is inside the range that pure microstructure noise
+    reproduces, and Indian mid-caps carry that much spread at the open
+    routinely.
+
+    So a large negative number here is evidence of nothing on its own.
+    Separating the two explanations needs intraday quotes, which this system
+    does not have; the registered hypothesis was abandoned on exactly that
+    ground rather than confirmed. `tests/test_studies.py` holds the
+    demonstration, so the confound cannot be quietly forgotten.
     """
     ordered = panel.sort(["symbol", "event_time"]).with_columns(
         (pl.col("open") / pl.col("close").shift(1).over("symbol") - 1).alias("gap"),

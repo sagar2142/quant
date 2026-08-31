@@ -191,3 +191,61 @@ class TestSignificance:
 
     def test_the_floor_matches_the_catalogue(self):
         assert pytest.approx(3.0) == MIN_T_STAT
+
+
+class TestGapReversionCannotBeIdentifiedFromDailyBars:
+    """The confound that decided the registered hypothesis — §5.1.
+
+    `gap = open / prev_close - 1` and `intraday = close / open - 1` share the
+    open with opposite signs. Measurement error in the recorded open therefore
+    appears as `+e` in one series and `-e` in the other, producing negative
+    correlation in a market with no reversion at all.
+
+    These tests build exactly that market — the intraday move is drawn
+    independently of the overnight move — and add noise only to the *recorded*
+    open. The study reports strong, significant reversion anyway, which is why
+    its real-data result of -0.2180 at t = -117.6 was not treated as a finding.
+    """
+
+    def market(self, open_noise: float, names: int = 40, sessions: int = 400) -> pl.DataFrame:
+        rng = np.random.default_rng(42)
+        closes, opens = {}, {}
+        for i in range(names):
+            close = np.empty(sessions)
+            true_open = np.empty(sessions)
+            level = 100.0
+            for t in range(sessions):
+                true_open[t] = level * (1 + rng.normal(0, 0.012))
+                # Drawn from the open, independently of the overnight move:
+                # this market has no gap reversion in it whatsoever.
+                close[t] = true_open[t] * (1 + rng.normal(0, 0.012))
+                level = close[t]
+            recorded = true_open * (1 + rng.normal(0, open_noise, sessions))
+            closes[f"N{i:02d}"], opens[f"N{i:02d}"] = close, recorded
+        return panel(closes, opens)
+
+    def test_a_clean_open_shows_no_reversion(self):
+        """The control. Without measurement error the study correctly finds
+        nothing, so what follows is attributable to the noise and not to the
+        fixture."""
+        result = gap_reversion(self.market(open_noise=0.0))
+        assert not result.is_significant
+
+    def test_half_a_percent_of_noise_manufactures_significant_reversion(self):
+        result = gap_reversion(self.market(open_noise=0.005))
+        assert result.statistic < -0.05
+        assert result.is_significant
+
+    def test_the_artefact_grows_with_the_noise(self):
+        """Monotone in the noise, which is the signature of a mechanical
+        relationship rather than an economic one."""
+        mild = gap_reversion(self.market(open_noise=0.002))
+        severe = gap_reversion(self.market(open_noise=0.01))
+        assert severe.statistic < mild.statistic
+
+    def test_the_artefact_reaches_the_magnitude_measured_on_real_data(self):
+        """One percent noise reproduces a statistic past the -0.2180 the NSE
+        panel showed. If this ever stops holding, the real-data result deserves
+        a second look — but while it holds, that result is unidentified."""
+        result = gap_reversion(self.market(open_noise=0.01))
+        assert result.statistic < -0.2180

@@ -413,6 +413,10 @@ class TestPanelCacheTracksTheLake:
             from apps.api.analytics import _lake_fingerprint
 
             assert _lake_fingerprint() == (2, "2026-08-21")
+            # Per venue, not per lake. BSE has its own directory and its own
+            # history — it starts in 2024 where NSE starts in 2019 — so one
+            # fingerprint for both would serve whichever was read first.
+            assert _lake_fingerprint("BSE") == (0, "")
 
     def test_an_unreadable_lake_fingerprints_as_empty(self, tmp_path):
         from unittest.mock import patch
@@ -422,6 +426,7 @@ class TestPanelCacheTracksTheLake:
             from apps.api.analytics import _lake_fingerprint
 
             assert _lake_fingerprint() == (0, "")
+            assert _lake_fingerprint("BSE") == (0, "")
 
     def test_an_unchanged_lake_is_served_from_cache(self):
         """The reason the cache exists: 3.3M rows on every screen."""

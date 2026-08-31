@@ -242,7 +242,7 @@ def cadence_panel(span: pl.DataFrame, args: argparse.Namespace) -> Panel | None:
     membership stays point-in-time correct: restricting it to names that traded
     inside the window would select on having survived it.
     """
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
     universe = build_universe(store, CADENCE_UNIVERSE)
     if not universe:
         return None
@@ -315,6 +315,42 @@ def run_cadence_study(  # noqa: PLR0913, PLR0917 - a hypothesis, its cadence, an
     return Verdict(HypothesisStatus.OPEN, f"{reason} — clears its own criteria, needs the gauntlet")
 
 
+#: Terciles, matching the studies. The conditioned bucket is the top one.
+CONDITION_BUCKETS = 3
+
+
+def conditioned_net_spread(history: pl.DataFrame, factor: Factor, horizon: int) -> float:
+    """Net spread of a factor inside the top tercile of traded volume.
+
+    The conditional hypotheses claim an effect is *stronger* somewhere. Being
+    stronger is not the same as being tradeable, and both registered kill
+    criteria say so: `or_net_spread: "<= 0"`. A larger IC inside a bucket whose
+    spread still cannot pay its own turnover has not found a strategy, and
+    high-turnover names are precisely where costs are highest — so the question
+    has to be asked of the bucket rather than of the panel.
+    """
+    horizons = tuple(sorted({*FORWARD_HORIZONS, horizon}))
+    scored = build_factor(history, FactorSpec(factor, min_adv=1e7), horizons)
+    volume = history.select("event_time", "instrument_id", "volume")
+    joined = (
+        scored.join(volume, on=["event_time", "instrument_id"], how="left")
+        .drop_nulls("volume")
+        .with_columns(
+            (
+                (pl.col("volume").rank("ordinal").over("event_time") - 1)
+                * CONDITION_BUCKETS
+                // pl.len().over("event_time")
+            ).alias("bucket")
+        )
+    )
+    top = joined.filter(pl.col("bucket") == CONDITION_BUCKETS - 1).drop("volume", "bucket")
+    if top.is_empty():
+        return 0.0
+    report = analyse_factor(top, factor.value, horizons, horizon, 5)
+    per_rebalance = min(1.0, report.turnover * report.quantile_horizon)
+    return float(report.spread - per_rebalance * ROUND_TRIP_COST)
+
+
 def run_study(history: pl.DataFrame, name: str, predicted: str) -> Verdict:
     """Run one of the four studies and judge it against its own prediction.
 
@@ -347,6 +383,37 @@ def run_study(history: pl.DataFrame, name: str, predicted: str) -> Verdict:
     right_way = result.statistic < 0 if predicted == "negative" else result.statistic > 0
     if not right_way:
         return Verdict(HypothesisStatus.REJECTED, f"{reason} — sign opposite to the prediction")
+
+    # **A significant gap reversion is not evidence, because the statistic is
+    # not identified from daily bars.** `open` enters the gap positively and
+    # the intraday return negatively, so pricing error in the recorded open
+    # appears in both with opposite signs and manufactures exactly this result.
+    # A market simulated with zero reversion and 1% noise on the open alone
+    # reproduces a statistic past the -0.2180 measured here.
+    #
+    # Abandoned rather than rejected: the claim was not shown false, it was
+    # shown untestable with the data this system has. Separating the two needs
+    # intraday quotes. A null would still have been informative — the noise only
+    # pushes negative — which is why an insignificant result above is a genuine
+    # rejection and this one is not.
+    if name == "gap_reversion":
+        return Verdict(
+            HypothesisStatus.ABANDONED,
+            f"{reason} — unidentified: opening-print noise reproduces this exactly",
+        )
+
+    # A conditional claim commits to a net spread as well as a direction, so
+    # ask the bucket it named. Reversal is stronger in high-turnover names —
+    # IC 0.0383 against 0.0295 — and the bucket still cannot pay its turnover,
+    # which is the hypothesis's own kill criterion rather than a new standard.
+    if name == "conditional_ic":
+        net = conditioned_net_spread(history, Factor.REVERSAL_5D, 5)
+        if net <= 0:
+            return Verdict(
+                HypothesisStatus.REJECTED,
+                f"{reason} — stronger, but the bucket nets {net:+.3%} after costs",
+            )
+        return Verdict(HypothesisStatus.OPEN, f"{reason} — nets {net:+.3%}, needs the gauntlet")
 
     # A claim that survives its own test is not yet a strategy: none of these
     # produces a tradeable signal on its own, and confirming here would skip
@@ -394,13 +461,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-adv", type=float, default=1e7)
     parser.add_argument("--sessions", type=int, default=0)
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to read. BSE history begins 2024-01-01; NSE begins 2019.",
+    )
     return parser.parse_args(argv)
 
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
     try:
         history = load_panel(store)
     except NoDataError as exc:

@@ -138,6 +138,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-orthogonalise", action="store_true")
     parser.add_argument("--equal-weight", action="store_true")
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to read. BSE history begins 2024-01-01; NSE begins 2019.",
+    )
     return parser.parse_args(argv)
 
 
@@ -214,7 +220,7 @@ def run(argv: list[str] | None = None) -> int:
         print("give a factor name, or --all, --combine a,b,c, or --overlap")
         return 1
 
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
     try:
         history = load_panel(store)
     except NoDataError as exc:

@@ -34,6 +34,7 @@ the plan keeps those apart everywhere else too (§8, §17).
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from enum import Enum
 
@@ -169,8 +170,39 @@ class SignalStrategy(Strategy):
         self.long_only = long_only
         self.gross = gross
 
-    @staticmethod
-    def _symbol_to_instrument(view: MarketView) -> dict[str, InstrumentId]:
+        # Columns pulled out once as plain arrays. `scores_at` used to filter
+        # and group-by the whole frame on every bar, which made a backtest
+        # quadratic in its own length: 78 seconds over 600 sessions implied an
+        # estimated 14.7 hours over 1,891, and a twelve-check gauntlet was
+        # unrunnable. This is the same fix `MarketView.series` already carries.
+        self._times = self.scores["event_time"].to_numpy()
+        self._symbols: list[str] = [str(v) for v in self.scores["symbol"].to_list()]
+        self._signals = self.scores["signal"].to_numpy()
+
+        # Rolling "latest score per symbol", advanced rather than recomputed.
+        # The engine walks bars forward, so each row is consumed exactly once
+        # across a whole run; a cursor that goes backwards resets it, which
+        # keeps the result identical to the frame-scanning version.
+        self._cursor = 0
+        self._latest: dict[str, float] = {}
+        self._walked = False
+
+        # `symbol -> instrument_id`, likewise built by consuming only new rows.
+        self._symbol_map: dict[str, InstrumentId] = {}
+        self._history_cursor = 0
+        self._map_universe: tuple[InstrumentId, ...] | None = None
+
+    def _rebuild_symbol_map(self, view: MarketView) -> dict[str, InstrumentId]:
+        """The whole-frame version, kept for views that cannot be walked."""
+        pairs = view.history.select("symbol", "instrument_id").unique()
+        tradable = {str(i) for i in view.universe}
+        return {
+            str(symbol): InstrumentId(str(instrument_id))
+            for symbol, instrument_id in zip(pairs["symbol"], pairs["instrument_id"], strict=True)
+            if str(instrument_id) in tradable
+        }
+
+    def _symbol_to_instrument(self, view: MarketView) -> dict[str, InstrumentId]:
         """Ticker to instrument id, as the view itself reports it.
 
         **The scored panel is keyed by symbol and the universe by instrument
@@ -182,37 +214,80 @@ class SignalStrategy(Strategy):
         Resolved from the view rather than a static table so that a symbol
         which has worn more than one ISIN maps to whichever the engine is
         currently trading (§1.1). 344 NSE symbols have.
+
+        **Built by consuming only the rows that are new.** The view history
+        grows by appending — it is one frame filtered at a later cutoff — so
+        rows already seen cannot change, and a later ISIN for a symbol
+        overwrites an earlier one exactly as the full rebuild did. Rebuilding
+        with `.unique()` over the whole visible panel every bar was, together
+        with `scores_at`, what made this strategy quadratic.
         """
         if view.history.is_empty():
-            return {}
-        pairs = view.history.select("symbol", "instrument_id").unique()
-        tradable = {str(i) for i in view.universe}
-        return {
-            str(symbol): InstrumentId(str(instrument_id))
-            for symbol, instrument_id in zip(pairs["symbol"], pairs["instrument_id"], strict=True)
-            if str(instrument_id) in tradable
-        }
+            return self._symbol_map
+
+        # The append-only assumption holds only when receive_time is monotone,
+        # which is the same condition the engine partition requires. Without
+        # it, rebuild rather than trust a cursor into a frame whose earlier
+        # rows may have moved.
+        if view.partition is None:
+            return self._rebuild_symbol_map(view)
+
+        if self._map_universe != view.universe:
+            self._map_universe = view.universe
+            self._symbol_map = {}
+            self._history_cursor = 0
+
+        height = view.history.height
+        if height > self._history_cursor:
+            fresh = view.history.slice(self._history_cursor, height - self._history_cursor).select(
+                "symbol", "instrument_id"
+            )
+            tradable = {str(i) for i in view.universe}
+            for symbol, instrument_id in zip(fresh["symbol"], fresh["instrument_id"], strict=True):
+                name = str(instrument_id)
+                if name in tradable:
+                    self._symbol_map[str(symbol)] = InstrumentId(name)
+            self._history_cursor = height
+        return self._symbol_map
 
     def scores_at(self, view: MarketView) -> dict[InstrumentId, float]:
         """Each name's most recent score at or before the decision time.
 
-        The second look-ahead guard. Filtering on `as_of` rather than taking
-        the whole frame is what makes a precomputed panel safe to hold.
+        The second look-ahead guard. The cutoff is what makes a precomputed
+        panel safe to hold: nothing stamped after `as_of` can be read.
+
+        **Advanced, not recomputed.** Scores are sorted by `event_time`, so the
+        visible prefix is found by binary search and only the rows between the
+        previous cutoff and this one are folded into a running map. The answer
+        is identical to filtering the whole frame and taking the last score per
+        symbol — the last write for a symbol wins either way — but it costs
+        each row once per run instead of once per bar.
         """
-        visible = self.scores.filter(pl.col("event_time") <= view.as_of)
-        if visible.is_empty():
+        cut = int(
+            np.searchsorted(
+                self._times, np.datetime64(view.as_of.replace(tzinfo=None)), side="right"
+            )
+        )
+
+        # A cutoff earlier than the last one means this is not a forward walk,
+        # so the running map may already hold scores from beyond it. Rebuild
+        # from the start rather than answer with something that read ahead.
+        if self._walked and cut < self._cursor:
+            self._cursor = 0
+            self._latest = {}
+        self._walked = True
+
+        for i in range(self._cursor, cut):
+            self._latest[self._symbols[i]] = float(self._signals[i])
+        self._cursor = cut
+        if not self._latest:
             return {}
 
-        latest = (
-            visible.group_by("symbol")
-            .agg(pl.col("signal").last().alias("signal"))
-            .filter(pl.col("signal").is_finite())
-        )
         resolved = self._symbol_to_instrument(view)
         return {
-            resolved[symbol]: float(score)
-            for symbol, score in zip(latest["symbol"], latest["signal"], strict=True)
-            if symbol in resolved
+            resolved[symbol]: score
+            for symbol, score in self._latest.items()
+            if symbol in resolved and math.isfinite(score)
         }
 
     def _realised_vol(self, view: MarketView, instrument_id: InstrumentId) -> float | None:

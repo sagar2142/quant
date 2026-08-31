@@ -28,7 +28,14 @@ from core.instruments import Instrument, InstrumentId
 from core.orders import OrderState, Side
 from trading.execution.orders import Order, TradingMode
 
-__all__ = ["BrokerAdapter", "BrokerError", "BrokerFill", "BrokerPosition", "PaperBroker"]
+__all__ = [
+    "BrokerAdapter",
+    "BrokerError",
+    "BrokerFill",
+    "BrokerOrder",
+    "BrokerPosition",
+    "PaperBroker",
+]
 
 
 class BrokerError(RuntimeError):
@@ -51,6 +58,36 @@ class BrokerFill:
     price: Decimal
     fees: Decimal
     event_time: object
+
+
+@dataclass(frozen=True)
+class BrokerOrder:
+    """A working order as the venue reports it.
+
+    **The venue is the authority on what is live, not this process.** An order
+    can be rejected, partially filled or cancelled by the exchange between
+    submission and the next time anyone looks, so a local list of "what I sent"
+    is a record of intent and not of state. Reading it back is the only way to
+    know what is actually resting.
+
+    `status` is passed through verbatim rather than mapped onto `OrderState`.
+    A venue vocabulary that does not fit the local state machine should be
+    visible as itself, not silently coerced into the nearest match (§14.1.5).
+    """
+
+    broker_order_id: str
+    instrument_id: InstrumentId
+    side: Side
+    quantity: Decimal
+    filled_quantity: Decimal
+    price: Decimal | None
+    status: str
+    placed_at: str
+
+    @property
+    def pending_quantity(self) -> Decimal:
+        """What is still resting at the venue."""
+        return self.quantity - self.filled_quantity
 
 
 @dataclass(frozen=True)

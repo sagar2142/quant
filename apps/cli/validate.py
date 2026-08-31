@@ -129,6 +129,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--lake", default=None)
     parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to read. BSE history begins 2024-01-01; NSE begins 2019.",
+    )
+    parser.add_argument(
         "--hypothesis",
         default=None,
         help=(
@@ -166,7 +172,7 @@ def load_market(args: argparse.Namespace) -> tuple[Panel, list[float]] | None:
     disagree about what was tested. Returns None, having explained why, when
     there is nothing to test.
     """
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
     try:
         history = load_panel(store)
     except NoDataError as exc:

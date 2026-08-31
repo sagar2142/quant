@@ -17,6 +17,9 @@ import { Factors } from "./components/Factors";
 import { Tutorial } from "./components/Tutorial";
 import { RiskModel } from "./components/RiskModel";
 import { Screener } from "./components/Screener";
+import { OrderBook } from "./components/OrderBook";
+import { Ticket } from "./components/Ticket";
+import { Workspace } from "./components/Workspace";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
 import { PriceChart } from "./components/Sparkline";
 import { Th } from "./components/Th";
@@ -32,6 +35,7 @@ import {
 } from "./format";
 import "./tokens.css";
 import "./shell.css";
+import "./terminal.css";
 
 //: Marks that the tutorial has been shown, so it opens once and is a
 //: reference thereafter.
@@ -39,6 +43,9 @@ const SEEN_TUTORIAL = "neutron.tutorial.seen";
 
 type Screen =
   | "tutorial"
+  | "charts"
+  | "trade"
+  | "orderbook"
   | "overview"
   | "factors"
   | "riskmodel"
@@ -57,10 +64,13 @@ const SCREENS: {
   group: "Analysis" | "Operations";
 }[] = [
   { group: "Analysis", id: "tutorial", label: "Tutorial", icon: "?", key: "t" },
+  { group: "Analysis", id: "charts", label: "Charts", icon: "▥", key: "g" },
   { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
   { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
   { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
   { group: "Analysis", id: "riskmodel", label: "Risk model", icon: "◈", key: "m" },
+  { group: "Operations", id: "trade", label: "Trade", icon: "⇅", key: "d" },
+  { group: "Operations", id: "orderbook", label: "Order book", icon: "≡", key: "k" },
   { group: "Operations", id: "overview", label: "Overview", icon: "◧", key: "o" },
   { group: "Operations", id: "positions", label: "Positions", icon: "▤", key: "p" },
   { group: "Operations", id: "blotter", label: "Blotter", icon: "▦", key: "b" },
@@ -454,6 +464,26 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "charts" ? (
+              <Panel title="Charts" flush>
+                <Workspace
+                  onTrade={(symbol) => {
+                    setPicked(symbol);
+                    setScreen("trade");
+                  }}
+                />
+              </Panel>
+            ) : null}
+            {screen === "trade" ? (
+              <Panel title="Order ticket" flush>
+                <Ticket symbol={picked ?? "RELIANCE"} onSymbolChange={setPicked} />
+              </Panel>
+            ) : null}
+            {screen === "orderbook" ? (
+              <Panel title="Order book" flush>
+                <OrderBook />
+              </Panel>
+            ) : null}
             {screen === "tutorial" ? (
               <Panel title="How this system works" flush>
                 <Tutorial onDismiss={() => setScreen("factors")} />

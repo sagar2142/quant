@@ -38,7 +38,7 @@ from core.config import settings
 from core.instruments import Instrument, InstrumentId
 from core.orders import OrderType, Side
 from core.secrets import BrokerCredentials
-from trading.execution.broker import BrokerError, BrokerFill, BrokerPosition
+from trading.execution.broker import BrokerError, BrokerFill, BrokerOrder, BrokerPosition
 from trading.execution.orders import Order, TradingMode
 
 __all__ = ["KITE_API_BASE", "KiteBroker"]
@@ -232,6 +232,47 @@ class KiteBroker:
 
         if response.status_code != httpx.codes.OK:
             raise BrokerError(f"cancel of {broker_order_id} failed: HTTP {response.status_code}")
+
+    def orders(self) -> list[BrokerOrder]:
+        """Every order Kite is holding for today, resting or otherwise.
+
+        **Read from the venue, never from a local list.** What this process
+        sent is intent; what the exchange is holding is fact, and between the
+        two sit rejections, partial fills and cancellations nobody here
+        initiated. A console that listed its own submissions would show a
+        working order that had been rejected an hour earlier.
+
+        Kite keeps an order book for the session only, so this is today's
+        orders — which is the right scope for a screen you cancel from.
+        """
+        client = self._http()
+        try:
+            response = client.get(f"{KITE_API_BASE}/orders", headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise BrokerError(f"could not fetch orders: {exc}") from exc
+        finally:
+            if self.client is None:
+                client.close()
+
+        if response.status_code != httpx.codes.OK:
+            raise BrokerError(f"orders fetch failed: HTTP {response.status_code}")
+
+        rows = response.json().get("data", [])
+        return [
+            BrokerOrder(
+                broker_order_id=str(row["order_id"]),
+                instrument_id=InstrumentId(f"NSE:{row['tradingsymbol']}"),
+                side=Side.BUY if row["transaction_type"] == "BUY" else Side.SELL,
+                quantity=Decimal(str(row["quantity"])),
+                filled_quantity=Decimal(str(row.get("filled_quantity", 0))),
+                # A market order has no price of its own; None says so rather
+                # than reporting a zero that reads as "free".
+                price=Decimal(str(row["price"])) if row.get("price") else None,
+                status=str(row.get("status", "UNKNOWN")),
+                placed_at=str(row.get("order_timestamp", "")),
+            )
+            for row in rows
+        ]
 
     def positions(self) -> list[BrokerPosition]:
         """What Kite believes is held. The reconciliation baseline (§9)."""

@@ -239,7 +239,11 @@ def factor_scores(panel: Panel, factor: Factor, sessions: int) -> pl.DataFrame:
     """
     scored = build_factor(panel.history, FactorSpec(factor, window=sessions), (1,))
     if scored.is_empty():
-        return scored
+        # Selected even when empty. Returning the raw frame handed an empty
+        # panel that still carried `fwd_1` to `SignalStrategy`, which refused it
+        # as a forward leak — so a window too short to score reported itself as
+        # look-ahead, which is a different and much more alarming problem.
+        return scored.select("event_time", "symbol", "signal") if scored.width else scored
     return scored.select("event_time", "symbol", "signal")
 
 

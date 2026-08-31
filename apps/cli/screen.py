@@ -65,6 +65,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to read. BSE history begins 2024-01-01; NSE begins 2019.",
+    )
     return parser.parse_args(argv)
 
 
@@ -95,7 +101,7 @@ def print_result(result: ScreenResult) -> None:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    store = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
 
     try:
         history = load_panel(store)

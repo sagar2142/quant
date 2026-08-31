@@ -40,7 +40,7 @@ from quant.analytics.crosssection import analyse_cross_section
 from quant.analytics.screener import ScreenCriteria, SortKey, screen_universe
 from quant.analytics.security import profile_security
 
-__all__ = ["build_analytics_router"]
+__all__ = ["build_analytics_router", "latest_quote"]
 
 #: Cap on symbols per cross-section request. The correlation work is O(n^2) and
 #: a browser cannot read a 200-name matrix anyway.
@@ -60,33 +60,55 @@ MIN_CROSS_SECTION = 2
 LIQUIDITY_WINDOW = 60
 
 
-@lru_cache(maxsize=1)
-def _read_panel(fingerprint: tuple[int, str]) -> pl.DataFrame:
-    """Read the whole panel. Keyed on the lake's own state, never called bare.
+#: Exchanges this console can serve.
+#:
+#: **Kept apart rather than merged into one tape.** A name listed on both
+#: exchanges has an NSE row and a BSE row with the same ISIN and different
+#: prices, and which venue you trade is a decision, not a detail. Merging them
+#: here would make that decision silently, for every screen at once (§13.4).
+VENUES = ("NSE", "BSE")
+DEFAULT_VENUE = "NSE"
 
-    The argument is not used for anything except cache identity: a different
+
+def _venue(raw: str | None) -> str:
+    """Validate a venue, or say which ones exist."""
+    if not raw:
+        return DEFAULT_VENUE
+    name = raw.upper()
+    if name not in VENUES:
+        raise HTTPException(status_code=422, detail=f"unknown venue {raw!r}; expected {VENUES}")
+    return name
+
+
+#: One cached panel per venue. Two, not one: the BSE panel is 2.7M rows beside
+#: NSE's 3.4M, and evicting one to read the other would make every switch
+#: between them a full re-read.
+@lru_cache(maxsize=len(VENUES))
+def _read_panel(fingerprint: tuple[int, str], venue: str) -> pl.DataFrame:
+    """Read one venue's whole panel. Keyed on the lake's own state.
+
+    The fingerprint is not used for anything except cache identity: a different
     fingerprint is a different lake, so `lru_cache` evicts and re-reads.
     """
     del fingerprint
-    store = PanelStore(settings.lake, venue="NSE")
-    return store.view(as_of=as_decision_time(utc_now()))
+    return PanelStore(settings.lake, venue=venue).view(as_of=as_decision_time(utc_now()))
 
 
-def _lake_fingerprint() -> tuple[int, str]:
-    """How many sessions the panel holds and the newest one, as a cache key.
+def _lake_fingerprint(venue: str = DEFAULT_VENUE) -> tuple[int, str]:
+    """How many sessions this venue holds and the newest one, as a cache key.
 
     `sessions()` is a filename glob and touches no file contents, so this costs
     a directory walk rather than a parquet read. Cheap enough to check on every
     request, which is what lets an ingest be picked up without a restart.
     """
     try:
-        sessions = PanelStore(settings.lake, venue="NSE").sessions()
+        sessions = PanelStore(settings.lake, venue=venue).sessions()
     except OSError:
         return (0, "")
     return (len(sessions), sessions[-1].isoformat() if sessions else "")
 
 
-def _panel() -> pl.DataFrame:
+def _panel(venue: str = DEFAULT_VENUE) -> pl.DataFrame:
     """The whole panel, re-read only when the lake has actually changed.
 
     Cached because it is large enough that a per-request read would be felt on
@@ -97,7 +119,7 @@ def _panel() -> pl.DataFrame:
     a daily-ingest system need a restart after every daily ingest to see the
     day it had just fetched.
     """
-    return _read_panel(_lake_fingerprint())
+    return _read_panel(_lake_fingerprint(venue), venue)
 
 
 def _not_found(history: pl.DataFrame, name: str) -> str:
@@ -132,9 +154,69 @@ def _windowed(history: pl.DataFrame, sessions: int) -> pl.DataFrame:
     return history.filter(pl.col("event_time").is_in(recent.implode()))
 
 
+def latest_quote(symbol: str, venue: str = DEFAULT_VENUE) -> dict[str, object] | None:
+    """Identity, last close and ADV for one ticker, or None if unknown.
+
+    **The instrument id is the point.** A ticket types "RELIANCE", but an order
+    and a position are keyed on ISIN (§1.1) — a symbol can wear more than one
+    ISIN over its life, and 344 names in this panel do. Sending a ticker to a
+    broker as though it were an identity is how an order ends up against the
+    wrong security after a face-value change.
+
+    The last close and ADV are returned with it because the risk engine needs
+    both: without a last price the fat-finger band cannot be evaluated, and it
+    blocks rather than passes when it cannot — correctly, since an order whose
+    sanity cannot be established has not been established as sane.
+    """
+    name = symbol.upper()
+    recent = _windowed(_panel(venue), LIQUIDITY_WINDOW).filter(pl.col("symbol") == name)
+    if recent.is_empty():
+        return None
+    last = recent.sort("event_time").tail(1)
+    turnover = recent.select((pl.col("close") * pl.col("volume")).median().alias("adv")).item()
+    return {
+        "symbol": name,
+        "venue": venue,
+        "instrument_id": str(last["instrument_id"][0]),
+        "last_close": float(last["close"][0]),
+        "adv": float(turnover or 0.0),
+        "as_of": last["event_time"][0].date().isoformat(),
+    }
+
+
+def _register_venues(router: APIRouter) -> None:
+    @router.get("/venues", dependencies=[ReadAccess])
+    def venues() -> list[dict[str, object]]:
+        """Which exchanges have data, and how much.
+
+        Reported rather than assumed, because they do not cover the same
+        period: NSE runs from 2019, while BSE's UDiFF archive only begins in
+        2024 — ask for an earlier BSE session and the exchange returns its
+        homepage with a 200. A console that offered both as though they were
+        interchangeable would show an empty chart and no reason for it.
+        """
+        rows: list[dict[str, object]] = []
+        for name in VENUES:
+            try:
+                sessions = PanelStore(settings.lake, venue=name).sessions()
+            except OSError:
+                sessions = []
+            rows.append(
+                {
+                    "venue": name,
+                    "sessions": len(sessions),
+                    "first": sessions[0].isoformat() if sessions else None,
+                    "last": sessions[-1].isoformat() if sessions else None,
+                }
+            )
+        return rows
+
+
 def _register_search(router: APIRouter) -> None:
     @router.get("/symbols", dependencies=[ReadAccess])
-    def symbols(q: str = Query("", max_length=32)) -> list[dict[str, object]]:
+    def symbols(
+        q: str = Query("", max_length=32), venue: str = Query(DEFAULT_VENUE)
+    ) -> list[dict[str, object]]:
         """Symbol search, ranked by liquidity.
 
         Ranked rather than alphabetical: the name you want is almost always one
@@ -142,7 +224,7 @@ def _register_search(router: APIRouter) -> None:
         illiquid tickers sharing a prefix.
         """
         try:
-            history = _panel()
+            history = _panel(_venue(venue))
         except NoDataError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -163,9 +245,11 @@ def _register_search(router: APIRouter) -> None:
 
 def _register_security(router: APIRouter) -> None:
     @router.get("/security/{symbol}", response_model=SecurityResponse, dependencies=[ReadAccess])
-    def security(symbol: str, sessions: int = Query(0, ge=0)) -> SecurityResponse:
+    def security(
+        symbol: str, sessions: int = Query(0, ge=0), venue: str = Query(DEFAULT_VENUE)
+    ) -> SecurityResponse:
         try:
-            history = _windowed(_panel(), sessions)
+            history = _windowed(_panel(_venue(venue)), sessions)
         except NoDataError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -219,9 +303,11 @@ def _register_security(router: APIRouter) -> None:
         )
 
     @router.get("/security/{symbol}/series", dependencies=[ReadAccess])
-    def series(symbol: str, sessions: int = Query(0, ge=0)) -> dict[str, list[object]]:
+    def series(
+        symbol: str, sessions: int = Query(0, ge=0), venue: str = Query(DEFAULT_VENUE)
+    ) -> dict[str, list[object]]:
         """Back-adjusted close series, for charting."""
-        history = _windowed(_panel(), sessions)
+        history = _windowed(_panel(_venue(venue)), sessions)
         name = symbol.upper()
         rows = series_for(history, name, load_actions(history, [name]))
         if rows.is_empty():
@@ -231,18 +317,105 @@ def _register_security(router: APIRouter) -> None:
             "closes": [float(c) for c in rows["close"].to_list()],
         }
 
+    @router.get("/security/{symbol}/ohlc", dependencies=[ReadAccess])
+    def ohlc(
+        symbol: str, sessions: int = Query(0, ge=0), venue: str = Query(DEFAULT_VENUE)
+    ) -> dict[str, object]:
+        """Back-adjusted OHLC and volume — what a candle chart needs.
+
+        `series_for` has always returned all five columns; the close-only
+        endpoint above simply discarded four of them, which is why the console
+        could draw a sparkline and not a chart.
+
+        Back-adjusted for the same reason every other analytics screen is: a
+        1:1 bonus read from raw prices is a -50% candle that never happened
+        (§9). The panel itself still stores raw prices, because the backtester
+        applies actions to positions instead.
+        """
+        history = _windowed(_panel(_venue(venue)), sessions)
+        name = symbol.upper()
+        rows = series_for(history, name, load_actions(history, [name]))
+        if rows.is_empty():
+            raise HTTPException(status_code=404, detail=_not_found(history, name))
+        return {
+            "symbol": name,
+            "dates": [d.date().isoformat() for d in rows["event_time"].to_list()],
+            "open": [float(v) for v in rows["open"].to_list()],
+            "high": [float(v) for v in rows["high"].to_list()],
+            "low": [float(v) for v in rows["low"].to_list()],
+            "close": [float(v) for v in rows["close"].to_list()],
+            "volume": [float(v) for v in rows["volume"].to_list()],
+        }
+
+
+def _register_quote(router: APIRouter) -> None:
+    @router.get("/quote/{symbol}", dependencies=[ReadAccess])
+    def quote(symbol: str, venue: str = Query(DEFAULT_VENUE)) -> dict[str, object]:
+        """Identity, last close and ADV for one ticker.
+
+        What a ticket needs before it can price anything: an order priced off a
+        blank field is not an order, and a market order still needs a reference
+        for the fat-finger band to be measured against.
+        """
+        found = latest_quote(symbol, _venue(venue))
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not in the panel")
+        return found
+
+
+def _register_watchlist(router: APIRouter) -> None:
+    @router.get("/watchlist", dependencies=[ReadAccess])
+    def watchlist(
+        symbols: str = Query("", max_length=1024), venue: str = Query(DEFAULT_VENUE)
+    ) -> list[dict[str, object]]:
+        """Last close and session change for a handful of names.
+
+        From the panel, not from a vendor. `/quotes` fetches live delayed
+        prices and is the right thing mid-session; this is the close-to-close
+        move, which is what the charts on the same screen are drawing. Mixing
+        the two in one row would put a live price next to a change computed
+        from closes and invite the reader to subtract them.
+
+        Unknown symbols are omitted rather than returned as zeros: a watchlist
+        row reading 0.00 is indistinguishable from a stock that fell to nothing.
+        """
+        wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()][:MAX_SYMBOLS]
+        if not wanted:
+            return []
+
+        recent = _windowed(_panel(_venue(venue)), 2).filter(pl.col("symbol").is_in(wanted))
+        rows: list[dict[str, object]] = []
+        for symbol in wanted:
+            series = recent.filter(pl.col("symbol") == symbol).sort("event_time")
+            if series.is_empty():
+                continue
+            closes = [float(c) for c in series["close"].to_list()]
+            last = closes[-1]
+            previous = closes[-2] if len(closes) > 1 else None
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "last": last,
+                    "change_pct": None if previous in (None, 0) else (last / previous - 1) * 100,
+                    "volume": float(series["volume"].to_list()[-1]),
+                    "as_of": series["event_time"].to_list()[-1].date().isoformat(),
+                }
+            )
+        return rows
+
 
 def _register_cross_section(router: APIRouter) -> None:
     @router.get("/crosssection", response_model=CrossSectionResponse, dependencies=[ReadAccess])
     def crosssection(
         symbols: str = Query(..., description="Comma-separated symbols"),
         sessions: int = Query(750, ge=0),
+        venue: str = Query(DEFAULT_VENUE),
     ) -> CrossSectionResponse:
         wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()][:MAX_SYMBOLS]
         if len(wanted) < MIN_CROSS_SECTION:
             raise HTTPException(status_code=422, detail="a cross-section needs 2+ symbols")
 
-        history = _windowed(_panel(), sessions)
+        history = _windowed(_panel(_venue(venue)), sessions)
         actions = load_actions(history, wanted)
         kept, matrix = aligned_returns(history, wanted, actions)
         if not matrix.size:
@@ -286,12 +459,13 @@ def _register_cross_section(router: APIRouter) -> None:
 
 def _register_screen(router: APIRouter) -> None:
     @router.get("/screen", response_model=ScreenResponse, dependencies=[ReadAccess])
-    def screen(
+    def screen(  # noqa: PLR0913, PLR0917 - a screen is its criteria; grouping them hides the API
         sort: str = Query("liquidity"),
         limit: int = Query(25, ge=1, le=200),
         window: int = Query(250, ge=60),
         min_adv: float = Query(1e7, ge=0),
         stationary_only: bool = Query(default=False),
+        venue: str = Query(DEFAULT_VENUE),
     ) -> ScreenResponse:
         """Which names, rather than what is this name.
 
@@ -305,7 +479,7 @@ def _register_screen(router: APIRouter) -> None:
             raise HTTPException(status_code=422, detail=f"unknown sort {sort!r}") from exc
 
         result = screen_universe(
-            _panel(),
+            _panel(_venue(venue)),
             ScreenCriteria(
                 window=window,
                 min_adv=min_adv,
@@ -354,8 +528,11 @@ def build_analytics_router() -> APIRouter:
     are added, and the limit is there to catch exactly that.
     """
     router = APIRouter(tags=["analytics"])
+    _register_venues(router)
     _register_search(router)
     _register_security(router)
+    _register_quote(router)
+    _register_watchlist(router)
     _register_cross_section(router)
     _register_screen(router)
     return router

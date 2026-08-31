@@ -40,6 +40,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-value", type=float, default=1_000_000.0)
     parser.add_argument("--show", type=int, default=10, help="Members to list")
     parser.add_argument("--lake", default=None)
+    parser.add_argument(
+        "--venue",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to read. BSE history begins 2024-01-01; NSE begins 2019.",
+    )
     return parser.parse_args(argv)
 
 
@@ -83,7 +89,7 @@ def survivorship_report(early: Universe, late: Universe) -> None:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    panel = PanelStore(args.lake if args.lake is not None else settings.lake, venue="NSE")
+    panel = PanelStore(args.lake if args.lake is not None else settings.lake, venue=args.venue)
 
     sessions = panel.sessions()
     if not sessions:

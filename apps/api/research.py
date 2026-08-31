@@ -150,7 +150,7 @@ def build_research_router() -> APIRouter:
         two thirds of it turns out to be the market, which reframes what the
         factor work is actually moving.
         """
-        from apps.api.analytics import _lake_fingerprint  # noqa: PLC0415 - shared cache
+        from apps.api.analytics import DEFAULT_VENUE, _lake_fingerprint  # noqa: PLC0415
         from apps.api.book import DEFAULT_STATE_DIR, _latest_marks  # noqa: PLC0415
         from trading.paper.state import PaperStateStore, StateCorruptError  # noqa: PLC0415
 
@@ -171,7 +171,7 @@ def build_research_router() -> APIRouter:
         if not values:
             return RiskResponse(present=False, note="The book holds nothing.")
 
-        model = _cached_risk_model(sessions, _lake_fingerprint())
+        model = _cached_risk_model(sessions, _lake_fingerprint(DEFAULT_VENUE))
         if model is None:
             return RiskResponse(
                 present=False,

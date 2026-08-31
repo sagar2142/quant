@@ -22,6 +22,7 @@ from apps.cli.resolve import (
     committed_horizon,
     factor_for,
     judge,
+    run_study,
     threshold,
 )
 from engine.experiments.registry import HypothesisStatus
@@ -148,3 +149,40 @@ class TestJudgement:
     def test_the_significance_floor_is_uniform(self):
         """A threshold tuned per idea is a threshold tuned to the answer."""
         assert MIN_T_STAT == 3.0
+
+
+class TestGapReversionIsAbandonedNotConfirmed:
+    """A statistic that noise reproduces is not a finding — MASTER_PLAN §5.1.
+
+    `gap = open / prev_close - 1` and `intraday = close / open - 1` share the
+    open with opposite signs, so error in the recorded open manufactures
+    negative correlation in a market with none. The registered hypothesis was
+    therefore closed as untestable with daily bars rather than confirmed —
+    and, importantly, rather than rejected: the claim was never shown false.
+    """
+
+    def reverting(self, names: int = 30, sessions: int = 400) -> pl.DataFrame:
+        """Long enough to survive `prepare_panel`, which the resolver applies
+        before the study runs and which drops names without enough history."""
+        from tests.test_studies import TestGapReversion
+
+        return TestGapReversion().reverting(names, sessions)
+
+    def test_a_significant_result_is_abandoned_rather_than_left_open(self):
+        verdict = run_study(self.reverting(), "gap_reversion", "negative")
+        assert verdict.status is HypothesisStatus.ABANDONED
+        assert "unidentified" in verdict.reason
+
+    def test_it_is_not_recorded_as_a_rejection(self):
+        """Rejecting would put "this claim is false" on the record, which the
+        evidence does not support. The claim is untested, not disproved."""
+        verdict = run_study(self.reverting(), "gap_reversion", "negative")
+        assert verdict.status is not HypothesisStatus.REJECTED
+
+    def test_an_insignificant_result_is_still_a_genuine_rejection(self):
+        """The confound only pushes negative, so finding nothing despite it is
+        informative — that path must stay a rejection."""
+        rng = np.random.default_rng(7)
+        flat = panel({f"N{i:02d}": list(100.0 + rng.normal(0, 1, 10)) for i in range(30)})
+        verdict = run_study(flat, "gap_reversion", "negative")
+        assert verdict.status is HypothesisStatus.REJECTED

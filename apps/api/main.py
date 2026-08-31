@@ -31,6 +31,7 @@ from apps.api.auth import ReadAccess, WriteAccess
 from apps.api.book import DEFAULT_STATE_DIR, _latest_marks, build_book_router
 from apps.api.research import build_research_router
 from apps.api.snapshot import book_snapshot
+from apps.api.trade import build_trade_router
 from core.clock import utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
@@ -201,6 +202,7 @@ def create_app(
     app.include_router(build_book_router())
     # The fast research loop: score a signal without backtesting it.
     app.include_router(build_research_router())
+    app.include_router(build_trade_router(risk))
 
     @app.get("/health", dependencies=[ReadAccess])
     def health() -> dict[str, object]:

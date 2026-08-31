@@ -61,6 +61,44 @@ def _to_decimal(value: float) -> Decimal:
     return Decimal(str(value))
 
 
+def _session_bounds(history: pl.DataFrame, timestamps: list[datetime]) -> list[pl.DataFrame]:
+    """One frame per session, cut by binary search rather than by filtering.
+
+    The history is sorted by `event_time`, so every session is a contiguous
+    block of rows and its bounds are two searches. Filtering for each of them
+    instead scanned the whole panel once per bar.
+    """
+    if history.is_empty():
+        return [history for _ in timestamps]
+    column = history["event_time"].to_numpy()
+    wanted = np.array([np.datetime64(t.replace(tzinfo=None)) for t in timestamps])
+    starts = np.searchsorted(column, wanted, side="left")
+    ends = np.searchsorted(column, wanted, side="right")
+    return [history.slice(int(a), int(b - a)) for a, b in zip(starts, ends, strict=True)]
+
+
+def _visible_prefix(history: pl.DataFrame, timestamps: list[datetime]) -> list[pl.DataFrame]:
+    """What is observable at each decision time, as a slice per bar.
+
+    Only valid when `receive_time` is non-decreasing across the frame — then
+    "everything received by T" is a prefix. When it is not, this returns empty
+    frames and the caller falls back to filtering, because a prefix would
+    silently be the wrong rows: a late-arriving bar would be visible before it
+    arrived, which is the one failure this engine exists to prevent (§7.6).
+    """
+    if history.is_empty():
+        return [history for _ in timestamps]
+    received = history["receive_time"].to_numpy()
+    if received.size > 1 and bool(np.any(received[1:] < received[:-1])):
+        return []
+    # Cut at the decision time, not the bar stamp: `_build_view` filters on
+    # `as_decision_time(...)`, and cutting anywhere else would show a strategy
+    # a different set of rows than the filter did.
+    wanted = np.array([np.datetime64(as_decision_time(t).replace(tzinfo=None)) for t in timestamps])
+    cuts = np.searchsorted(received, wanted, side="right")
+    return [history.slice(0, int(c)) for c in cuts]
+
+
 class BacktestEngine:
     """Bar-driven simulator.
 
@@ -155,6 +193,17 @@ class BacktestEngine:
         # The partition is unfiltered; each view applies its own cutoff.
         partition = partition_by_instrument(history)
 
+        # Row boundaries per session, and the prefix each decision can see.
+        #
+        # `_marks`, the execution slice and `_build_view` each used to filter
+        # the entire frame on every bar, so the engine stayed quadratic after
+        # the partition fixed the strategy's half. Over 1,891 sessions those
+        # three scans were most of the runtime. The frame is sorted by
+        # event_time, so a session is a contiguous slice and binary search
+        # finds it; nothing about what a strategy can observe changes.
+        sessions = _session_bounds(history, timestamps)
+        visible = _visible_prefix(history, timestamps)
+
         # Stop one short: the final bar can never be an execution bar, so it can
         # never be a decision bar either.
         for index in range(len(timestamps) - 1):
@@ -164,7 +213,7 @@ class BacktestEngine:
 
             self._apply_corporate_actions(portfolio, decision_ts, execution_ts)
 
-            marks = self._marks(history, decision_ts)
+            marks = self._marks_from(sessions[index])
             last_marks.update(marks)
 
             # Charged before the bar is valued, so the cost of carrying a short
@@ -192,7 +241,13 @@ class BacktestEngine:
             if (index - lookback) % max(1, self.config.rebalance_every) != 0:
                 continue
 
-            view = self._build_view(history, decision_ts, universe, partition)
+            view = self._build_view(
+                history,
+                decision_ts,
+                universe,
+                partition,
+                prefix=visible[index] if visible else None,
+            )
             targets = self.strategy(view)
 
             equity = self._safe_equity(portfolio, last_marks)
@@ -202,7 +257,7 @@ class BacktestEngine:
             orders = self.planner.plan(portfolio, targets.weights, marks, equity)
             result.orders_generated += len(orders)
 
-            execution_slice = history.filter(pl.col("event_time") == execution_ts)
+            execution_slice = sessions[index + 1]
             for instrument_id, quantity in orders:
                 if execute_order(
                     self, state, instrument_id, quantity, execution_slice, execution_ts
@@ -213,7 +268,7 @@ class BacktestEngine:
         # This is also where the last execution bar's fills are recorded, since
         # the loop stops one short of it.
         if timestamps:
-            last_marks.update(self._marks(history, timestamps[-1]))
+            last_marks.update(self._marks_from(sessions[-1]))
             state.equity.append(self._equity_row(timestamps[-1], portfolio, last_marks))
 
         result.equity_curve = pl.DataFrame(state.equity) if state.equity else pl.DataFrame()
@@ -230,6 +285,7 @@ class BacktestEngine:
         universe: tuple[InstrumentId, ...],
         partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]]
         | None = None,
+        prefix: pl.DataFrame | None = None,
     ) -> MarketView:
         """Everything observable at the decision point, and nothing else.
 
@@ -242,9 +298,19 @@ class BacktestEngine:
                 rather than a scan of the entire frame; the view applies the
                 same `receive_time` cutoff to it, so what a strategy can see is
                 unchanged.
+            prefix: The observable rows, already sliced. Supplied when
+                receive_time is monotone, in which case the cutoff is a prefix
+                and slicing it is a binary search rather than a full scan. Falls
+                back to the filter when it is not, because a prefix would then
+                be the wrong rows rather than merely a slower way to the right
+                ones.
         """
         decision_time = as_decision_time(decision_ts)
-        observable = history.filter(pl.col("receive_time") <= decision_time)
+        observable = (
+            prefix
+            if prefix is not None
+            else history.filter(pl.col("receive_time") <= decision_time)
+        )
         return MarketView(
             as_of=decision_time,
             history=observable,
@@ -274,8 +340,8 @@ class BacktestEngine:
             portfolio.apply_funding(charge)
 
     @staticmethod
-    def _marks(history: pl.DataFrame, timestamp: datetime) -> dict[InstrumentId, Decimal]:
-        rows = history.filter(pl.col("event_time") == timestamp)
+    def _marks_from(rows: pl.DataFrame) -> dict[InstrumentId, Decimal]:
+        """Closes for one session, from rows already isolated."""
         return {
             row["instrument_id"]: _to_decimal(row["close"])
             for row in rows.select("instrument_id", "close").to_dicts()
