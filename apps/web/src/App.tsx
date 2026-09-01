@@ -18,6 +18,7 @@ import { Tutorial } from "./components/Tutorial";
 import { RiskModel } from "./components/RiskModel";
 import { Screener } from "./components/Screener";
 import { OrderBook } from "./components/OrderBook";
+import { Research } from "./components/Research";
 import { Ticket } from "./components/Ticket";
 import { Workspace } from "./components/Workspace";
 import { VitalsBar, type Vitals } from "./components/VitalsBar";
@@ -44,6 +45,7 @@ const SEEN_TUTORIAL = "neutron.tutorial.seen";
 type Screen =
   | "tutorial"
   | "charts"
+  | "research"
   | "trade"
   | "orderbook"
   | "overview"
@@ -64,6 +66,7 @@ const SCREENS: {
   group: "Analysis" | "Operations";
 }[] = [
   { group: "Analysis", id: "tutorial", label: "Tutorial", icon: "?", key: "t" },
+  { group: "Analysis", id: "research", label: "Security", icon: "◎", key: "e" },
   { group: "Analysis", id: "charts", label: "Charts", icon: "▥", key: "g" },
   { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
   { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
@@ -383,6 +386,10 @@ export function App({
   // Set when a screener row is clicked, so the analytics screen opens on that
   // name. Keyed on the component so it remounts and refetches.
   const [picked, setPicked] = useState<string | null>(null);
+  //: Which exchange the analysis screens read. Held in the shell so moving
+  //: between Security and Trade does not silently switch venue underneath a
+  //: symbol that exists on only one of them.
+  const [venue, setVenue] = useState("NSE");
 
   // Keyboard-first: `g` then a letter. The mouse is optional (§12.8).
   const handleKey = useCallback((event: KeyboardEvent) => {
@@ -464,6 +471,20 @@ export function App({
           </div>
         ) : (
           <div className="workspace">
+            {screen === "research" ? (
+              <Panel title="Security analysis" flush>
+                <Research
+                  symbol={picked ?? ""}
+                  venue={venue}
+                  onSymbolChange={setPicked}
+                  onVenueChange={setVenue}
+                  onTrade={(s) => {
+                    setPicked(s);
+                    setScreen("trade");
+                  }}
+                />
+              </Panel>
+            ) : null}
             {screen === "charts" ? (
               <Panel title="Charts" flush>
                 <Workspace
@@ -476,7 +497,7 @@ export function App({
             ) : null}
             {screen === "trade" ? (
               <Panel title="Order ticket" flush>
-                <Ticket symbol={picked ?? "RELIANCE"} onSymbolChange={setPicked} />
+                <Ticket symbol={picked ?? ""} onSymbolChange={setPicked} />
               </Panel>
             ) : null}
             {screen === "orderbook" ? (
@@ -504,7 +525,7 @@ export function App({
                 <Screener
                   onPick={(symbol) => {
                     setPicked(symbol);
-                    setScreen("analytics");
+                    setScreen("research");
                   }}
                 />
               </Panel>

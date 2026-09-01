@@ -788,3 +788,333 @@ table.grid .down {
   font-size: 9px;
   font-style: normal;
 }
+
+.watch-empty {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  padding: var(--space-3) var(--space-2);
+}
+
+/* ── security analysis ─────────────────────────────────────────────────────
+   One window of blocks. Deciding whether a name is worth trading means holding
+   its price action, its distribution and its drawdown in view at once. */
+
+.research {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.research-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  overflow: auto;
+  flex: 1 1 auto;
+  align-content: start;
+}
+
+.block {
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-bottom: var(--space-2);
+}
+
+.block-wide {
+  grid-column: 1 / -1;
+}
+
+.block-note {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: var(--space-2) var(--space-3) 0;
+}
+
+.verdict {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: var(--space-2) var(--space-3);
+}
+
+.research-price {
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: var(--space-2) var(--space-3) 0;
+}
+
+.stats.compact {
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+}
+
+.stat dt {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.stat dd {
+  color: var(--text-primary);
+  font-size: 13px;
+  margin: 1px 0 0;
+}
+
+.stat dd.up {
+  color: var(--profit);
+}
+
+.stat dd.down {
+  color: var(--loss);
+}
+
+.mini-chart {
+  margin: var(--space-2) var(--space-2) 0;
+}
+
+.mini-chart canvas {
+  display: block;
+}
+
+/* ── search ──────────────────────────────────────────────────────────────── */
+
+.symbol-search {
+  align-items: center;
+  display: flex;
+  gap: var(--space-2);
+  position: relative;
+}
+
+.search-input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  width: 220px;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.search-menu {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  left: 0;
+  list-style: none;
+  margin: 0;
+  max-height: 320px;
+  min-width: 300px;
+  overflow: auto;
+  padding: 0;
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 60;
+}
+
+.search-menu button {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  font-size: 11px;
+  gap: var(--space-2);
+  grid-template-columns: 1fr auto auto;
+  padding: 5px var(--space-3);
+  text-align: left;
+  width: 100%;
+}
+
+.search-menu button b {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.search-menu button.on {
+  background: var(--accent);
+  color: #04121f;
+}
+
+.search-menu button.on b,
+.search-menu button.on .muted {
+  color: #04121f;
+}
+
+.search-empty {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  padding: var(--space-3);
+}
+
+/* ── option chain ──────────────────────────────────────────────────────────
+   Calls left, puts right, strikes down the middle. Conventional on purpose:
+   a chain is read by shape, not by looking up individual cells. */
+
+.chain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chain-bar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.chain-scroll {
+  overflow-x: auto;
+}
+
+.chain-table {
+  min-width: 780px;
+}
+
+.chain-table th.chain-side {
+  text-align: center;
+}
+
+.chain-table th.chain-side.call {
+  color: var(--profit);
+}
+
+.chain-table th.chain-side.put {
+  color: var(--loss);
+}
+
+.chain-table th.chain-strike-head {
+  background: var(--bg-elevated);
+  text-align: center;
+}
+
+.chain-table td.chain-strike {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: center;
+}
+
+.chain-table td.itm {
+  background: rgba(74, 158, 255, 0.06);
+}
+
+.chain-table td.strong {
+  color: var(--text-primary);
+}
+
+.chain-table tr.atm td {
+  border-top: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+}
+
+.chain-table tr.atm td.chain-strike {
+  background: var(--accent);
+  color: #04121f;
+}
+
+/* ── expandable blocks ─────────────────────────────────────────────────────
+   The same block, given the whole window. A size toggle rather than a second
+   view: the block stays mounted, so a chart keeps its zoom and a chain keeps
+   its expiry. Escape restores. */
+
+.block-head {
+  align-items: center;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.block-head > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.block-expand {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  padding: 2px 5px;
+}
+
+.block:hover .block-expand,
+.block-expand:focus-visible {
+  opacity: 1;
+}
+
+.block-expand:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+/* An expanded block is always visible, and stays visible while the pointer is
+   elsewhere — otherwise the only way out would be the keyboard. */
+.block-expanded .block-expand {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* Only the expanded block occupies the grid, and it takes all of it. */
+.research-grid.is-expanded {
+  grid-template-columns: 1fr;
+  overflow: hidden;
+}
+
+.research-grid.is-expanded > .block:not(.block-expanded) {
+  display: none;
+}
+
+.block-expanded {
+  grid-column: 1 / -1;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.block-expanded .stats {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-4);
+}
+
+.block-expanded .stat dd {
+  font-size: 20px;
+}
+
+.block-expanded .verdict {
+  font-size: 14px;
+  max-width: 76ch;
+}
+
+.block-expanded .chain-table {
+  font-size: 12px;
+}

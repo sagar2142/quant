@@ -16,16 +16,10 @@ import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_KEY = "neutron.watchlist.v1";
 
-const DEFAULT_SYMBOLS = [
-  "RELIANCE",
-  "HDFCBANK",
-  "TCS",
-  "INFY",
-  "ICICIBANK",
-  "SBIN",
-  "BHARTIARTL",
-  "ITC",
-];
+//: Nothing is watched until it is asked for. A list of names picked by
+//: whoever wrote this file is not a watchlist, and a row you did not add is a
+//: price you have no reason to be reading.
+const NO_SYMBOLS: string[] = [];
 
 interface Row {
   symbol: string;
@@ -38,12 +32,12 @@ interface Row {
 function loadSymbols(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_SYMBOLS;
+    if (!raw) return NO_SYMBOLS;
     const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_SYMBOLS;
+    if (!Array.isArray(parsed)) return NO_SYMBOLS;
     return parsed.filter((s): s is string => typeof s === "string");
   } catch {
-    return DEFAULT_SYMBOLS;
+    return NO_SYMBOLS;
   }
 }
 
@@ -137,6 +131,9 @@ export function Watchlist({ active, venue, onPick }: WatchlistProps) {
             </button>
           </li>
         ))}
+        {symbols.length === 0 && (
+          <li className="watch-empty">Add a symbol to watch it.</li>
+        )}
       </ul>
       <div className="watch-add">
         <input

@@ -156,6 +156,15 @@ export function Chart({
   const dragRef = useRef<{ x: number; from: number; to: number } | null>(null);
 
   useEffect(() => {
+    // No symbol, no request. An empty name would ask for `/security//ohlc`,
+    // which is a 404 the pane would render as a failure rather than as the
+    // absence of a choice.
+    if (!symbol) {
+      setCandles([]);
+      setError("");
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError("");
@@ -473,7 +482,7 @@ export function Chart({
   return (
     <div className="chart">
       <div className="chart-readout">
-        <span className="chart-symbol">{symbol}</span>
+        <span className="chart-symbol">{symbol || "—"}</span>
         <span className="chart-venue">{venue}</span>
         {quote && (
           <span className="chart-live" title="Delayed vendor quote, never mixed into the candles">
@@ -506,7 +515,13 @@ export function Chart({
           </>
         ) : (
           <span className="chart-hint">
-            {loading ? "loading…" : error ? error : "scroll to zoom · drag to pan"}
+            {!symbol
+              ? "pick a symbol"
+              : loading
+                ? "loading…"
+                : error
+                  ? error
+                  : "scroll to zoom · drag to pan"}
           </span>
         )}
         <span className="chart-legend">

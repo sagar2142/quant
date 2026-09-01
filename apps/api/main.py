@@ -29,6 +29,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from apps.api.analytics import build_analytics_router
 from apps.api.auth import ReadAccess, WriteAccess
 from apps.api.book import DEFAULT_STATE_DIR, _latest_marks, build_book_router
+from apps.api.options import build_options_router
 from apps.api.research import build_research_router
 from apps.api.snapshot import book_snapshot
 from apps.api.trade import build_trade_router
@@ -202,6 +203,9 @@ def create_app(
     app.include_router(build_book_router())
     # The fast research loop: score a signal without backtesting it.
     app.include_router(build_research_router())
+    # Derivatives. Their own store and their own identity — a contract is
+    # underlying, expiry, strike and right, not an ISIN.
+    app.include_router(build_options_router())
     app.include_router(build_trade_router(risk))
 
     @app.get("/health", dependencies=[ReadAccess])

@@ -69,14 +69,17 @@ export interface TicketProps {
 export function Ticket({ symbol, onSymbolChange }: TicketProps) {
   const [status, setStatus] = useState<Status | null>(null);
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
-  const [quantity, setQuantity] = useState("100");
+  const [quantity, setQuantity] = useState("");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT">("MARKET");
   const [limitPrice, setLimitPrice] = useState("");
+  //: Restored if it was entered before, and otherwise blank. Never a made-up
+  //: figure: every percentage limit is a fraction of this, so a default would
+  //: make every risk check pass or fail against capital nobody has.
   const [equity, setEquity] = useState(() => {
     try {
-      return localStorage.getItem(EQUITY_KEY) ?? "1000000";
+      return localStorage.getItem(EQUITY_KEY) ?? "";
     } catch {
-      return "1000000";
+      return "";
     }
   });
   const [quote, setQuote] = useState<Quote | null>(null);
@@ -114,6 +117,7 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
   }, [symbol]);
 
   useEffect(() => {
+    if (!equity) return;
     try {
       localStorage.setItem(EQUITY_KEY, equity);
     } catch {
@@ -135,9 +139,19 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
   );
 
   const runPreview = async () => {
-    setBusy(true);
-    setMessage("");
     setConfirming(false);
+    setMessage("");
+    const blank = [
+      ["symbol", symbol],
+      ["quantity", quantity],
+      ["capital", equity],
+    ].filter(([, value]) => !String(value).trim());
+    if (blank.length > 0) {
+      setPreview(null);
+      setMessage(`fill in ${blank.map(([field]) => field).join(", ")}`);
+      return;
+    }
+    setBusy(true);
     // The reference is the limit price when one is given, and otherwise the
     // last close. The server re-reads that close itself and measures the order
     // against it, so a screen left open overnight is caught by the price band
@@ -213,6 +227,7 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
           <span>Symbol</span>
           <input
             value={symbol}
+            placeholder="e.g. the name you charted"
             onChange={(event) => onSymbolChange(event.target.value.toUpperCase())}
             spellCheck={false}
           />
@@ -248,7 +263,12 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
 
         <label>
           <span>Quantity</span>
-          <input value={quantity} onChange={(event) => setQuantity(event.target.value)} inputMode="numeric" />
+          <input
+            value={quantity}
+            placeholder="shares"
+            onChange={(event) => setQuantity(event.target.value)}
+            inputMode="numeric"
+          />
         </label>
 
         <label>
@@ -262,26 +282,36 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
         {orderType === "LIMIT" && (
           <label>
             <span>Limit price</span>
-            <input value={limitPrice} onChange={(event) => setLimitPrice(event.target.value)} inputMode="decimal" />
+            <input
+              value={limitPrice}
+              placeholder="price"
+              onChange={(event) => setLimitPrice(event.target.value)}
+              inputMode="decimal"
+            />
           </label>
         )}
 
         <label>
           <span>Capital</span>
-          <input value={equity} onChange={(event) => setEquity(event.target.value)} inputMode="numeric" />
+          <input
+            value={equity}
+            placeholder="capital this is sized against"
+            onChange={(event) => setEquity(event.target.value)}
+            inputMode="numeric"
+          />
           <small>
             Every percentage limit is a fraction of this. There is no book to read it from — paper
             trading was removed on purpose.
           </small>
         </label>
 
-        {quote && Number(quantity) > 0 && (
+        {quote && Number(quantity) > 0 && Number(equity) > 0 && (
           <p className="ticket-value">
             ≈ {(Number(quantity) * quote.last_close).toLocaleString("en-IN", {
               maximumFractionDigits: 0,
             })}{" "}
             <span className="muted">
-              ({((Number(quantity) * quote.last_close * 100) / Number(equity || 1)).toFixed(1)}% of
+              ({((Number(quantity) * quote.last_close * 100) / Number(equity)).toFixed(1)}% of
               capital)
             </span>
           </p>

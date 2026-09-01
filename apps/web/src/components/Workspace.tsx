@@ -64,11 +64,10 @@ interface Saved {
   panels: Panel[];
 }
 
-const DEFAULT_PANELS: Panel[] = [
-  { id: "p1", symbol: "RELIANCE", sessions: 252, logScale: false, venue: "NSE" },
-  { id: "p2", symbol: "HDFCBANK", sessions: 252, logScale: false, venue: "NSE" },
-  { id: "p3", symbol: "TCS", sessions: 252, logScale: false, venue: "NSE" },
-  { id: "p4", symbol: "INFY", sessions: 252, logScale: false, venue: "NSE" },
+//: One empty pane. The panes exist so there is somewhere to put a chart; which
+//: name goes in them is not a decision this file gets to make.
+const EMPTY_PANELS: Panel[] = [
+  { id: "p1", symbol: "", sessions: 252, logScale: false, venue: "NSE" },
 ];
 
 function load(): Saved {
@@ -77,10 +76,10 @@ function load(): Saved {
   // is a worse outcome than losing the layout.
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { layout: "quad", panels: DEFAULT_PANELS };
+    if (!raw) return { layout: "single", panels: EMPTY_PANELS };
     const parsed = JSON.parse(raw) as Saved;
     if (!Array.isArray(parsed.panels) || parsed.panels.length === 0) {
-      return { layout: "quad", panels: DEFAULT_PANELS };
+      return { layout: "single", panels: EMPTY_PANELS };
     }
     // A layout saved before venues existed carries no venue at all. Defaulted
     // rather than discarded: losing someone's workspace to add a field is a
@@ -90,7 +89,7 @@ function load(): Saved {
       panels: parsed.panels.map((panel) => ({ ...panel, venue: panel.venue ?? "NSE" })),
     };
   } catch {
-    return { layout: "quad", panels: DEFAULT_PANELS };
+    return { layout: "single", panels: EMPTY_PANELS };
   }
 }
 
@@ -148,7 +147,7 @@ function SymbolPicker({ value, venue, onPick }: SymbolPickerProps) {
       <input
         className="symbol-input"
         value={open ? typing : value}
-        placeholder={value}
+        placeholder="symbol"
         onFocus={() => {
           setOpen(true);
           setTyping("");
@@ -183,7 +182,19 @@ export interface WorkspaceProps {
 
 export function Workspace({ onTrade }: WorkspaceProps) {
   const [state, setState] = useState<Saved>(load);
+  //: Which pane, if any, has the window to itself. Not persisted: an
+  //: expanded pane is a thing you are doing now, not a layout.
+  const [full, setFull] = useState<string | null>(null);
   const [venues, setVenues] = useState<Venue[]>([]);
+
+  useEffect(() => {
+    if (!full) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFull(null);
+    };
+    document.addEventListener("keydown", escape);
+    return () => document.removeEventListener("keydown", escape);
+  }, [full]);
 
   useEffect(() => {
     fetch("/api/venues")
@@ -214,7 +225,7 @@ export function Workspace({ onTrade }: WorkspaceProps) {
         ...prev.panels,
         {
           id: `p${Date.now()}`,
-          symbol: prev.panels[prev.panels.length - 1]?.symbol ?? "RELIANCE",
+          symbol: "",
           sessions: 252,
           logScale: false,
           venue: prev.panels[prev.panels.length - 1]?.venue ?? "NSE",
@@ -231,8 +242,9 @@ export function Workspace({ onTrade }: WorkspaceProps) {
     }));
   };
 
-  const shown = state.panels.slice(0, visibleCount(state.layout));
-  const columns = LAYOUTS.find((l) => l.id === state.layout)?.columns ?? 2;
+  const visible = state.panels.slice(0, visibleCount(state.layout));
+  const shown = full ? visible.filter((panel) => panel.id === full) : visible;
+  const columns = full ? 1 : (LAYOUTS.find((l) => l.id === state.layout)?.columns ?? 2);
   const rows = Math.ceil(shown.length / columns);
   const paneHeight = Math.max(220, Math.floor((window.innerHeight - 170) / rows));
 
@@ -331,6 +343,14 @@ export function Workspace({ onTrade }: WorkspaceProps) {
               )}
               <button
                 type="button"
+                className={full === panel.id ? "ghost on" : "ghost"}
+                onClick={() => setFull((current) => (current === panel.id ? null : panel.id))}
+                title={full === panel.id ? "Restore (Esc)" : "Expand to full window"}
+              >
+                {full === panel.id ? "⤡" : "⤢"}
+              </button>
+              <button
+                type="button"
                 className="ghost danger"
                 onClick={() => removePanel(panel.id)}
                 title="Close this chart"
@@ -345,7 +365,7 @@ export function Workspace({ onTrade }: WorkspaceProps) {
               sessions={panel.sessions}
               logScale={panel.logScale}
               live={panel.live ?? false}
-              height={paneHeight}
+              height={full === panel.id ? Math.max(320, window.innerHeight - 150) : paneHeight}
             />
             </article>
           ))}
