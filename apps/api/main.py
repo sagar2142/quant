@@ -26,14 +26,19 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from apps.api.accounts import build_accounts_router, write_settings
 from apps.api.analytics import build_analytics_router
 from apps.api.auth import ReadAccess, WriteAccess
 from apps.api.book import DEFAULT_STATE_DIR, _latest_marks, build_book_router
+from apps.api.broker_keys import build_broker_keys_router
+from apps.api.candles import build_candles_router
+from apps.api.journal import build_journal_router
+from apps.api.lab import build_lab_router
 from apps.api.options import build_options_router
 from apps.api.research import build_research_router
 from apps.api.snapshot import book_snapshot
 from apps.api.trade import build_trade_router
-from core.clock import utc_now
+from core.clock import UTC, utc_now
 from core.config import settings
 from ops.alerts import AlertRouter, ConsoleSink
 from trading.risk.engine import RiskEngine
@@ -54,8 +59,7 @@ STALE_CRITICAL_SECONDS = 10.0
 #: in hours, not the seconds a tick feed is judged by. Applying the tick
 #: thresholds above to a daily batch would paint the feed red permanently and
 #: teach the operator to ignore the colour.
-CYCLE_WARN_SECONDS = 36 * 3600
-CYCLE_CRITICAL_SECONDS = 96 * 3600
+
 
 #: The lake holds one bar per session, so a weekend alone is two days old and
 #: healthy. Four days means a missed ingest; ten means the research on screen is
@@ -75,23 +79,37 @@ def _worst(*ages: float | None) -> float | None:
     return max(known) if known else None
 
 
-def _lake_staleness() -> float | None:
-    """Seconds since the most recent session in the panel, or None if unread.
+def _lake_staleness(venue: str = "NSE") -> float | None:
+    """Seconds since the most recent session in one venue's panel.
 
-    Separate from the paper cycle because they fail independently and for
-    different reasons. A daemon that stopped four days ago and a lake that
-    stopped ingesting three weeks ago are different problems, and the second is
-    the one that quietly invalidates every factor study on screen.
+    Per venue, because they are ingested separately and fail separately: NSE
+    runs from 2019 and BSE only from 2024, so one being current says nothing
+    about the other. A single light labelled for the whole lake would go green
+    on NSE while BSE quietly stopped.
     """
     from apps.api.analytics import _panel  # noqa: PLC0415 - shares the cached panel
 
     try:
-        latest = _panel()["event_time"].max()
+        latest = _panel(venue)["event_time"].max()
     except Exception:  # noqa: BLE001 - a monitoring surface must not 500 on data
         return None
     if not isinstance(latest, datetime):
         return None
     return max(0.0, float((utc_now() - latest).total_seconds()))
+
+
+def _derivatives_staleness() -> float | None:
+    """Seconds since the most recent derivatives session, or None if unread."""
+    from data.store.derivatives import DerivativesStore  # noqa: PLC0415
+
+    try:
+        latest = DerivativesStore(settings.lake).latest_session()
+    except Exception:  # noqa: BLE001 - as above
+        return None
+    if latest is None:
+        return None
+    age = utc_now() - datetime(latest.year, latest.month, latest.day, tzinfo=UTC)
+    return max(0.0, float(age.total_seconds()))
 
 
 def _health(
@@ -112,20 +130,22 @@ def _health(
     return "ok"
 
 
-def _cycle_health(staleness_seconds: float | None) -> Literal["ok", "degraded", "down"]:
-    """Feed health from how long ago the last paper cycle completed.
-
-    No cycle at all reports "down" rather than "ok". A system that has never
-    run is not a healthy one, and green on an unstarted book is the same lie as
-    a zero drawdown on a losing one.
-    """
-    if staleness_seconds is None:
-        return "down"
-    if staleness_seconds >= CYCLE_CRITICAL_SECONDS:
-        return "down"
-    if staleness_seconds >= CYCLE_WARN_SECONDS:
-        return "degraded"
-    return "ok"
+# `_cycle_health` and the CYCLE light are gone.
+#
+# They reported how long ago the paper-trading loop last completed a cycle.
+# `apps.cli.paper` is a command you run, not a daemon that runs itself, so on
+# an install where nobody had scheduled it the light read "down" permanently
+# and dragged the bar's staleness figure to 101 hours with it. A health
+# indicator that can only ever be red is worse than no indicator — it is the
+# thing that teaches an operator to stop reading the health bar, which is the
+# one part of the screen that has to be believed.
+#
+# What replaces it is the three data sources that actually exist and can
+# actually go stale: the NSE panel, the BSE panel and the derivatives store.
+# Paper trading itself is very much still here — `trading/paper/` holds the
+# session and its state, and the book, snapshot and risk screens all read it.
+# When the paper loop is scheduled the way `apps.cli.daily` now is, a cycle
+# light becomes meaningful again and belongs back on this bar.
 
 
 class VitalsResponse(BaseModel):
@@ -198,6 +218,9 @@ def create_app(
     # `apps.cli.terminal`, so the console and the terminal cannot disagree
     # about what a security is.
     app.include_router(build_analytics_router())
+    # Candles at any interval. Daily and weekly from the panel; intraday
+    # from the broker, and never written back into the panel (3).
+    app.include_router(build_candles_router())
     # Risk limits and the paper book. Read-only; the console's ops screens had
     # no source at all before this and rendered blank.
     app.include_router(build_book_router())
@@ -206,6 +229,20 @@ def create_app(
     # Derivatives. Their own store and their own identity — a contract is
     # underlying, expiry, strike and right, not an ISIN.
     app.include_router(build_options_router())
+    # The slow research loop: backtests and the twelve-check gauntlet, which
+    # take minutes and so run as jobs rather than as requests. Until this
+    # existed the console could display research but could start none.
+    app.include_router(build_lab_router())
+    # What execution actually cost, against what the model charged. The cost
+    # model had never been checked against anything but the curve it produced.
+    app.include_router(build_journal_router())
+    # Operator accounts. Identification and preferences — the API token
+    # is what decides whether the API answers at all (§13.7).
+    app.include_router(build_accounts_router())
+    # Per-account broker credentials, encrypted at rest. The router is
+    # handed the settings writer so it need not know which database
+    # holds accounts.
+    app.include_router(build_broker_keys_router(write_settings))
     app.include_router(build_trade_router(risk))
 
     @app.get("/health", dependencies=[ReadAccess])
@@ -236,17 +273,27 @@ def create_app(
             if limit > 0:
                 utilisation = snapshot.gross_exposure / limit
 
+        bse_age = _lake_staleness("BSE")
+        derivatives_age = _derivatives_staleness()
+
         return VitalsResponse(
             feeds=[
                 FeedStatus(
                     name="nse",
                     health=_health(lake_age, LAKE_WARN_SECONDS, LAKE_CRITICAL_SECONDS),
                 ),
-                FeedStatus(name="cycle", health=_cycle_health(snapshot.staleness_seconds)),
+                FeedStatus(
+                    name="bse",
+                    health=_health(bse_age, LAKE_WARN_SECONDS, LAKE_CRITICAL_SECONDS),
+                ),
+                FeedStatus(
+                    name="nfo",
+                    health=_health(derivatives_age, LAKE_WARN_SECONDS, LAKE_CRITICAL_SECONDS),
+                ),
             ],
-            # The worst of the two. One number on the bar must not be able to
-            # hide the other feed's problem behind the healthier one.
-            staleness_seconds=_worst(lake_age, snapshot.staleness_seconds),
+            # The worst of the three. One number on the bar must not be able to
+            # hide a stopped feed behind a healthier one.
+            staleness_seconds=_worst(lake_age, bse_age, derivatives_age),
             day_pnl=snapshot.day_pnl,
             day_pnl_pct=snapshot.day_pnl_pct,
             drawdown=snapshot.drawdown,

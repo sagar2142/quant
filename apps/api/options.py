@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from apps.api.auth import ReadAccess
 from core.clock import as_decision_time, utc_now
@@ -30,8 +30,16 @@ from core.config import settings
 from data.store.bars import NoDataError
 from data.store.derivatives import DerivativesStore
 from quant.options.pricing import CALL, PUT, greeks, implied_volatility, time_to_expiry
+from quant.options.strategy import (
+    STRUCTURES,
+    Leg,
+    LegKind,
+    Position,
+    PositionError,
+    analyse,
+)
 
-__all__ = ["DEFAULT_RATE", "build_options_router"]
+__all__ = ["DEFAULT_RATE", "analyse_strategy", "build_options_router"]
 
 #: Annualised risk-free rate used when the caller does not supply one.
 #:
@@ -214,9 +222,130 @@ def assemble_chain(
     )
 
 
+class StrategyLeg(BaseModel):
+    """One leg of a proposed structure, as the console describes it."""
+
+    kind: str = Field(pattern="^(CE|PE|EQ)$")
+    #: Signed lots. Negative is short.
+    quantity: int = Field(ge=-100, le=100)
+    price: float = Field(ge=0)
+    strike: float = Field(default=0.0, ge=0)
+    implied_vol: float | None = Field(default=None, ge=0, le=5)
+
+
+class StrategyRequest(BaseModel):
+    underlying: str
+    spot: float = Field(gt=0)
+    lot_size: float = Field(gt=0, le=100_000)
+    days_to_expiry: float = Field(ge=0, le=1000)
+    rate: float = Field(default=DEFAULT_RATE, ge=0, le=1)
+    legs: list[StrategyLeg] = Field(min_length=1, max_length=8)
+
+
+class StrategyPoint(BaseModel):
+    price: float
+    profit: float
+
+
+class StrategyResponse(BaseModel):
+    """What a multi-leg position is, in the terms a trader decides on."""
+
+    underlying: str
+    spot: float
+    days_to_expiry: float
+    net_premium: float
+    payoff: list[StrategyPoint]
+    #: Marked at today's volatilities. Empty when a leg has none — a curve
+    #: built from a mixture of market and assumed vols is unfalsifiable.
+    value: list[StrategyPoint]
+    breakevens: list[float]
+    #: null means unbounded. A short call's loss has no maximum, and a number
+    #: taken from the edge of the plotted range would be a confident fiction.
+    max_profit: float | None
+    max_loss: float | None
+    delta: float | None
+    gamma: float | None
+    vega: float | None
+    theta: float | None
+    rho: float | None
+    note: str
+
+
+def analyse_strategy(request: StrategyRequest) -> StrategyResponse:
+    """Payoff, present value, bounds and aggregate Greeks for one structure."""
+    try:
+        position = Position(
+            underlying=request.underlying.upper(),
+            legs=tuple(
+                Leg(
+                    kind=LegKind(leg.kind),
+                    quantity=leg.quantity,
+                    price=leg.price,
+                    strike=leg.strike,
+                    implied_vol=leg.implied_vol,
+                )
+                for leg in request.legs
+            ),
+            spot=request.spot,
+            lot_size=request.lot_size,
+            days_to_expiry=request.days_to_expiry,
+            rate=request.rate,
+        )
+    except PositionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    result = analyse(position)
+    sensitivities = result.greeks
+    return StrategyResponse(
+        underlying=result.underlying,
+        spot=result.spot,
+        days_to_expiry=result.days_to_expiry,
+        net_premium=result.net_premium,
+        payoff=[StrategyPoint(price=p, profit=v) for p, v in result.payoff],
+        value=[StrategyPoint(price=p, profit=v) for p, v in result.value],
+        breakevens=result.breakevens,
+        max_profit=result.max_profit,
+        max_loss=result.max_loss,
+        delta=sensitivities.delta if sensitivities else None,
+        gamma=sensitivities.gamma if sensitivities else None,
+        vega=sensitivities.vega if sensitivities else None,
+        theta=sensitivities.theta if sensitivities else None,
+        rho=sensitivities.rho if sensitivities else None,
+        note=result.note,
+    )
+
+
 def build_options_router() -> APIRouter:
-    """Underlyings, expiries and the chain."""
+    """Underlyings, expiries, the chain, and multi-leg structures."""
     router = APIRouter(prefix="/options", tags=["options"])
+
+    @router.get("/structures", dependencies=[ReadAccess])
+    def structures() -> list[dict[str, object]]:
+        """The named structures a builder offers, with how many strikes each
+        needs. A closed set: a butterfly built from two strikes is a vertical
+        spread wearing the wrong name, and it would plot perfectly well."""
+        return [
+            {
+                "name": name,
+                "label": label,
+                "strikes": max(index for _, _, index in template) + 1,
+                "legs": [
+                    {"kind": kind.value, "quantity": quantity, "strike_index": index}
+                    for kind, quantity, index in template
+                ],
+            }
+            for name, (label, template) in STRUCTURES.items()
+        ]
+
+    @router.post("/strategy", response_model=StrategyResponse, dependencies=[ReadAccess])
+    def strategy(request: StrategyRequest) -> StrategyResponse:
+        """Analyse a multi-leg position.
+
+        A chain prices one contract at a time and nobody trades one contract at
+        a time. The offset between legs is the whole point of a structure, and
+        it is exactly what a strike-by-strike view cannot show.
+        """
+        return analyse_strategy(request)
 
     @router.get("/underlyings", dependencies=[ReadAccess])
     def underlyings(q: str = Query("", max_length=32)) -> list[str]:

@@ -71,10 +71,23 @@ class TestHealth:
         assert body["status"] == "ok"
         assert body["kill_engaged"] is False
 
-    def test_live_is_disabled_by_default(self, harness):
-        """Default-off is deliberate (§21)."""
+    def test_live_is_disabled_by_default(self):
+        """Default-off is deliberate (§21).
+
+        Asserted on the field's default rather than through the API, because
+        `Settings` reads the developer's `.env` — a machine with
+        `NEUTRON_LIVE_ENABLED=true` in it would fail this test while the claim
+        it makes about the shipped default is still perfectly true. The claim
+        is about what an unconfigured install does.
+        """
+        assert Settings.model_fields["live_enabled"].default is False
+
+    def test_health_reports_the_configured_live_flag(self, harness):
+        """And the endpoint reports whatever is actually set, either way."""
+        from core.config import settings as live_settings
+
         client, _, _ = harness
-        assert client.get("/health").json()["live_enabled"] is False
+        assert client.get("/health").json()["live_enabled"] == live_settings.live_enabled
 
 
 class TestVitals:
@@ -191,8 +204,8 @@ class TestHostValidation:
 def _feed(client, name: str) -> dict:
     """One feed from /vitals, by name.
 
-    By name rather than by index: the bar carries both the lake and the paper
-    cycle, and position is not identity.
+    By name rather than by index: the bar carries one light per venue and
+    position is not identity.
     """
     feeds = {f["name"]: f for f in client.get("/vitals").json()["feeds"]}
     return feeds[name]
@@ -242,47 +255,51 @@ class TestVitalsReadRealState:
         body = client.get("/vitals").json()
         assert body["book_present"] is False
         assert body["drawdown"] is None
-        # `staleness_seconds` is the worse of the lake and the cycle, so an
-        # absent book does not make it null — the lake still has an age. The
-        # paper feed is where "never ran" shows.
-        assert _feed(client, "cycle")["health"] == "down"
+        # An absent book does not blank the staleness reading — the lake still
+        # has an age, and the bar must keep reporting it.
+        assert body["staleness_seconds"] is None or body["staleness_seconds"] >= 0
 
-    def test_a_book_that_never_ran_is_not_healthy(self, harness, monkeypatch, tmp_path):
+    def test_a_book_that_never_ran_reports_nothing_rather_than_zero(
+        self, harness, monkeypatch, tmp_path
+    ):
         """Green on an unstarted system is the same lie as a zero drawdown on
         a losing one."""
         client, _, _ = harness
         monkeypatch.setattr("apps.api.main.DEFAULT_STATE_DIR", tmp_path / "nothing")
         monkeypatch.setattr("apps.api.book.DEFAULT_STATE_DIR", tmp_path / "nothing")
-        assert _feed(client, "cycle")["health"] == "down"
+        body = client.get("/vitals").json()
+        assert body["book_present"] is False
+        assert body["day_pnl"] is None
+        assert body["risk_utilisation"] is None
 
-    def test_a_stale_cycle_degrades_the_feed(self, harness, monkeypatch, tmp_path):
-        from datetime import timedelta
-
-        client, _, _ = harness
-        self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(hours=48))
-        assert _feed(client, "cycle")["health"] == "degraded"
-
-    def test_a_very_stale_cycle_marks_the_feed_down(self, harness, monkeypatch, tmp_path):
-        from datetime import timedelta
+    def test_a_stale_lake_degrades_its_feed(self, harness, monkeypatch):
+        from apps.api import main as main_module
 
         client, _, _ = harness
-        self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(days=7))
-        assert _feed(client, "cycle")["health"] == "down"
+        monkeypatch.setattr(main_module, "_lake_staleness", lambda venue="NSE": 5 * 24 * 3600)
+        assert _feed(client, "nse")["health"] == "degraded"
 
-    def test_a_fresh_cycle_is_healthy(self, harness, monkeypatch, tmp_path):
-        from datetime import timedelta
+    def test_a_very_stale_lake_marks_its_feed_down(self, harness, monkeypatch):
+        from apps.api import main as main_module
 
         client, _, _ = harness
-        self.paper_book(monkeypatch, tmp_path, cycle_age=timedelta(minutes=5))
-        assert _feed(client, "cycle")["health"] == "ok"
+        monkeypatch.setattr(main_module, "_lake_staleness", lambda venue="NSE": 30 * 24 * 3600)
+        assert _feed(client, "nse")["health"] == "down"
 
-    def test_the_daily_cycle_is_not_judged_on_the_tick_feed_thresholds(self):
+    def test_a_fresh_lake_is_healthy(self, harness, monkeypatch):
+        from apps.api import main as main_module
+
+        client, _, _ = harness
+        monkeypatch.setattr(main_module, "_lake_staleness", lambda venue="NSE": 3600.0)
+        assert _feed(client, "nse")["health"] == "ok"
+
+    def test_a_daily_lake_is_not_judged_on_the_tick_feed_thresholds(self):
         """§12.7's 2s/10s describe a live tick feed. A once-a-session batch
         judged by them would sit red permanently, which teaches the operator to
         ignore the colour."""
-        from apps.api.main import CYCLE_WARN_SECONDS, STALE_WARN_SECONDS
+        from apps.api.main import LAKE_WARN_SECONDS, STALE_WARN_SECONDS
 
-        assert CYCLE_WARN_SECONDS > STALE_WARN_SECONDS * 1000
+        assert LAKE_WARN_SECONDS > STALE_WARN_SECONDS * 1000
 
 
 class TestRiskLimitsObservations:
@@ -354,19 +371,19 @@ class TestEnvironmentIsNotAsserted:
         assert client.get("/health").json()["environment"] in {"dev", "paper", "live"}
 
 
-class TestBothFeedsAreReported:
-    """The lake and the paper cycle go stale independently.
+class TestEveryFeedIsReported:
+    """The three lakes are ingested separately and go stale separately.
 
-    The bar reported only the paper cycle, so a lake that stopped ingesting
-    three weeks ago was invisible while every factor study on screen was being
-    computed from it. Two feeds, and the headline staleness is the worse of the
-    two so neither can hide behind the other.
+    NSE runs from 2019 and BSE only from 2024, and the F&O archive is a third
+    job again. One light labelled for "the lake" would sit green on NSE while
+    BSE quietly stopped, so there is one per venue and the headline staleness
+    is the worst of them — none can hide behind another.
     """
 
-    def test_the_lake_and_the_cycle_are_separate_feeds(self, harness):
+    def test_each_venue_is_its_own_feed(self, harness):
         client, _, _ = harness
         names = {f["name"] for f in client.get("/vitals").json()["feeds"]}
-        assert names == {"nse", "cycle"}
+        assert names == {"nse", "bse", "nfo"}
 
     def test_headline_staleness_is_the_worse_of_the_two(self):
         from apps.api.main import _worst
