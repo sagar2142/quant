@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { StrategyBuilder } from "./StrategyBuilder";
 
 interface Leg {
   contract_id: string;
@@ -74,9 +75,11 @@ function iv(value: number | null): string {
 
 export interface OptionChainProps {
   underlying: string;
+  /** Send a contract to the order ticket. */
+  onTrade?: (terms: { expiry: string; strike: string; right: "CE" | "PE" }) => void;
 }
 
-export function OptionChain({ underlying }: OptionChainProps) {
+export function OptionChain({ underlying, onTrade }: OptionChainProps) {
   const [expiries, setExpiries] = useState<Expiry[]>([]);
   const [chosen, setChosen] = useState<string>("");
   const [chain, setChain] = useState<Chain | null>(null);
@@ -143,7 +146,7 @@ export function OptionChain({ underlying }: OptionChainProps) {
   if (error) {
     return (
       <p className="empty">
-        {error.includes("no listed contracts") ? `${underlying} has no listed options.` : error}
+        {error.includes("no listed contracts") ? `No listed options for ${underlying}.` : error}
       </p>
     );
   }
@@ -222,13 +225,39 @@ export function OptionChain({ underlying }: OptionChainProps) {
                       {iv(row.call?.implied_vol ?? null)}
                     </td>
                     <td className={`num mono strong ${itmCall ? "itm" : ""}`}>
-                      {show(row.call?.close ?? null, 2)}
+                      {row.call && onTrade ? (
+                        <button
+                          type="button"
+                          className="chain-buy"
+                          title={`Trade the ${row.strike} call`}
+                          onClick={() =>
+                            onTrade({ expiry: chosen, strike: String(row.strike), right: "CE" })
+                          }
+                        >
+                          {show(row.call.close, 2)}
+                        </button>
+                      ) : (
+                        show(row.call?.close ?? null, 2)
+                      )}
                     </td>
 
                     <td className="num mono chain-strike">{row.strike.toFixed(1)}</td>
 
                     <td className={`num mono strong ${!itmCall ? "itm" : ""}`}>
-                      {show(row.put?.close ?? null, 2)}
+                      {row.put && onTrade ? (
+                        <button
+                          type="button"
+                          className="chain-buy"
+                          title={`Trade the ${row.strike} put`}
+                          onClick={() =>
+                            onTrade({ expiry: chosen, strike: String(row.strike), right: "PE" })
+                          }
+                        >
+                          {show(row.put.close, 2)}
+                        </button>
+                      ) : (
+                        show(row.put?.close ?? null, 2)
+                      )}
                     </td>
                     <td className={`num mono ${!itmCall ? "itm" : ""}`}>
                       {iv(row.put?.implied_vol ?? null)}
@@ -248,10 +277,25 @@ export function OptionChain({ underlying }: OptionChainProps) {
             </tbody>
           </table>
           <p className="block-note">
-            IV and Greeks are inverted from the closing price under Black-Scholes at r ={" "}
-            {(chain.rate * 100).toFixed(2)}%, European exercise. A blank means the price is not
-            invertible — usually a strike that did not trade.
+            Implied volatility and Greeks derived from closing prices (Black-Scholes, European, r ={" "}
+            {(chain.rate * 100).toFixed(2)}%). Blank values indicate a strike that did not trade.
           </p>
+
+          {/* The chain above shows one contract per row; nobody trades one
+              contract. The builder is here rather than on a tab of its own
+              because it needs this expiry's prices and volatilities, and a
+              second fetch of the same chain could disagree with what is on
+              screen. */}
+          <details className="builder-fold" open>
+            <summary>Strategy builder</summary>
+            <StrategyBuilder
+              underlying={chain.underlying}
+              spot={chain.underlying_price}
+              lotSize={chain.lot_size}
+              daysToExpiry={chain.days_to_expiry}
+              rows={chain.rows}
+            />
+          </details>
         </div>
       )}
     </div>

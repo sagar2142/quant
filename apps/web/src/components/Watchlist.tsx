@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Icon } from "./Icon";
 
 const STORAGE_KEY = "neutron.watchlist.v1";
 
@@ -114,37 +115,37 @@ export function Watchlist({ active, venue, onPick }: WatchlistProps) {
               title={`Remove ${row.symbol}`}
               onClick={() => setSymbols((prev) => prev.filter((s) => s !== row.symbol))}
             >
-              ×
+              <Icon name="close" />
             </button>
           </li>
         ))}
         {missing.map((symbol) => (
           <li key={symbol} className="watch-missing">
             <span>{symbol}</span>
-            <span className="muted">not in panel</span>
+            <span className="muted">not found</span>
             <button
               type="button"
               className="watch-remove"
               onClick={() => setSymbols((prev) => prev.filter((s) => s !== symbol))}
             >
-              ×
+              <Icon name="close" />
             </button>
           </li>
         ))}
         {symbols.length === 0 && (
-          <li className="watch-empty">Add a symbol to watch it.</li>
+          <li className="watch-empty">No symbols added</li>
         )}
       </ul>
       <div className="watch-add">
         <input
           value={adding}
-          placeholder="add symbol"
+          placeholder="Add symbol"
           onChange={(event) => setAdding(event.target.value)}
           onKeyDown={(event) => event.key === "Enter" && add()}
           spellCheck={false}
         />
         <button type="button" className="ghost" onClick={add}>
-          +
+          <Icon name="plus" />
         </button>
       </div>
     </aside>

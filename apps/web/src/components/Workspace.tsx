@@ -18,6 +18,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Chart } from "./Chart";
+import { Icon } from "./Icon";
+import { Popout, usePopouts } from "./Popout";
 import { Watchlist } from "./Watchlist";
 
 const STORAGE_KEY = "neutron.workspace.v2";
@@ -31,8 +33,15 @@ interface Venue {
   last: string | null;
 }
 
-/** Lookbacks offered per panel. 0 is the whole panel history. */
+/** Lookbacks offered per pane. 0 is the whole panel history.
+ *
+ *  The short ranges are in sessions for daily candles and in days for
+ *  intraday, which is the same number for 1D and 5D and diverges after that —
+ *  the label means "how much history", and the request carries whichever the
+ *  chosen interval reads. */
 const RANGES: { label: string; sessions: number }[] = [
+  { label: "1D", sessions: 1 },
+  { label: "5D", sessions: 5 },
   { label: "1M", sessions: 21 },
   { label: "3M", sessions: 63 },
   { label: "6M", sessions: 126 },
@@ -40,6 +49,14 @@ const RANGES: { label: string; sessions: number }[] = [
   { label: "3Y", sessions: 756 },
   { label: "Max", sessions: 0 },
 ];
+
+interface IntervalInfo {
+  key: string;
+  label: string;
+  intraday: boolean;
+  available: boolean;
+  detail: string;
+}
 
 const LAYOUTS: { id: Layout; label: string; columns: number }[] = [
   { id: "single", label: "1", columns: 1 },
@@ -57,6 +74,7 @@ interface Panel {
   logScale: boolean;
   venue: string;
   live?: boolean;
+  interval?: string;
 }
 
 interface Saved {
@@ -185,7 +203,13 @@ export function Workspace({ onTrade }: WorkspaceProps) {
   //: Which pane, if any, has the window to itself. Not persisted: an
   //: expanded pane is a thing you are doing now, not a layout.
   const [full, setFull] = useState<string | null>(null);
+  //: Panes living in their own OS window, for a second monitor.
+  const popouts = usePopouts();
   const [venues, setVenues] = useState<Venue[]>([]);
+  //: Which candle sizes exist, and which are usable. Asked once: intraday
+  //: needs a broker, and a button that silently returns nothing is worse than
+  //: one that says why it cannot.
+  const [intervals, setIntervals] = useState<IntervalInfo[]>([]);
 
   useEffect(() => {
     if (!full) return;
@@ -195,6 +219,13 @@ export function Workspace({ onTrade }: WorkspaceProps) {
     document.addEventListener("keydown", escape);
     return () => document.removeEventListener("keydown", escape);
   }, [full]);
+
+  useEffect(() => {
+    fetch("/api/intervals")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => setIntervals(Array.isArray(rows) ? rows : []))
+      .catch(() => setIntervals([]));
+  }, []);
 
   useEffect(() => {
     fetch("/api/venues")
@@ -266,10 +297,15 @@ export function Workspace({ onTrade }: WorkspaceProps) {
           ))}
         </div>
         <button type="button" className="ghost" onClick={addPanel}>
-          + chart
+          <Icon name="plus" /> Add chart
         </button>
+        {popouts.blocked && (
+          <span className="popout-blocked" onClick={popouts.clearBlocked}>
+            {popouts.blocked}
+          </span>
+        )}
         <span className="charts-hint">
-          scroll zooms · drag pans · double-click resets · layout is saved
+          Scroll to zoom · Drag to pan · Double-click to reset
         </span>
       </header>
 
@@ -308,6 +344,22 @@ export function Workspace({ onTrade }: WorkspaceProps) {
                 value={panel.symbol}
                 onPick={(s) => update(panel.id, { symbol: s })}
               />
+              {intervals.length > 0 && (
+                <div className="segmented small">
+                  {intervals.map((entry) => (
+                    <button
+                      key={entry.key}
+                      type="button"
+                      className={(panel.interval ?? "1d") === entry.key ? "on" : ""}
+                      disabled={!entry.available}
+                      onClick={() => update(panel.id, { interval: entry.key })}
+                      title={entry.detail}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="segmented small">
                 {RANGES.map((r) => (
                   <button
@@ -343,11 +395,23 @@ export function Workspace({ onTrade }: WorkspaceProps) {
               )}
               <button
                 type="button"
+                className={popouts.windows.has(panel.id) ? "ghost on" : "ghost"}
+                onClick={() => popouts.toggle(panel.id, panel.symbol || 'Chart')}
+                title={
+                  popouts.windows.has(panel.id)
+                    ? "Bring back into this window"
+                    : "Open this chart in a separate window"
+                }
+              >
+                <Icon name="popout" />
+              </button>
+              <button
+                type="button"
                 className={full === panel.id ? "ghost on" : "ghost"}
                 onClick={() => setFull((current) => (current === panel.id ? null : panel.id))}
                 title={full === panel.id ? "Restore (Esc)" : "Expand to full window"}
               >
-                {full === panel.id ? "⤡" : "⤢"}
+                <Icon name={full === panel.id ? "collapse" : "expand"} />
               </button>
               <button
                 type="button"
@@ -356,17 +420,49 @@ export function Workspace({ onTrade }: WorkspaceProps) {
                 title="Close this chart"
                 disabled={state.panels.length <= 1}
               >
-                ×
+                <Icon name="close" />
               </button>
             </header>
-            <Chart
-              symbol={panel.symbol}
-              venue={panel.venue}
-              sessions={panel.sessions}
-              logScale={panel.logScale}
-              live={panel.live ?? false}
-              height={full === panel.id ? Math.max(320, window.innerHeight - 150) : paneHeight}
-            />
+            {popouts.windows.has(panel.id) ? (
+              <>
+                <p className="popout-note">
+                  Open in a separate window
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => popouts.toggle(panel.id, panel.symbol || 'Chart')}
+                  >
+                    Return
+                  </button>
+                </p>
+                <Popout
+                  title={`${panel.symbol || "chart"} · ${panel.venue}`}
+                  target={popouts.windows.get(panel.id) as Window}
+                  onClose={() => popouts.close(panel.id)}
+                >
+                  <div className="popout-chart">
+                    <Chart
+                      symbol={panel.symbol}
+                      venue={panel.venue}
+                      sessions={panel.sessions}
+                      interval={panel.interval ?? "1d"}
+                      logScale={panel.logScale}
+                      live={panel.live ?? false}
+                      height={720}
+                    />
+                  </div>
+                </Popout>
+              </>
+            ) : (
+              <Chart
+                symbol={panel.symbol}
+                venue={panel.venue}
+                sessions={panel.sessions}
+                logScale={panel.logScale}
+                live={panel.live ?? false}
+                height={full === panel.id ? Math.max(320, window.innerHeight - 150) : paneHeight}
+              />
+            )}
             </article>
           ))}
         </div>

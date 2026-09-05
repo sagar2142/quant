@@ -56,6 +56,13 @@
   --row-comfortable: 32px;
 
   --shell-vitals: 40px;
+  /* The command bar replaces the old vitals strip as the top row: it
+     carries the symbol and venue for the whole console, with vitals
+     pushed to its right. */
+  --shell-command: 44px;
+  /* Four workspaces in an icon rail, where fourteen labelled screens
+     used to take 168px of every screen's width. */
+  --shell-rail: 62px;
   --shell-status: 24px;
   /* Wide enough for a label. An icon-only rail makes every screen a guess,
    * and a system whose analytics cannot be found does not have analytics. */
@@ -169,14 +176,6 @@ td.num,
   }
 }
 
-.flash-up {
-  animation: flash-profit var(--flash-duration) ease-out;
-}
-
-.flash-down {
-  animation: flash-loss var(--flash-duration) ease-out;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -185,13 +184,4 @@ td.num,
     transition-duration: 0.01ms !important;
   }
 
-  /* The flash is replaced, not merely disabled: the information it carried
-   * still needs somewhere to go. */
-  .flash-up {
-    border-left: 2px solid var(--profit);
-  }
-
-  .flash-down {
-    border-left: 2px solid var(--loss);
-  }
 }

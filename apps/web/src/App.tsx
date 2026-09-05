@@ -1,84 +1,87 @@
 /**
  * Ops console shell — MASTER_PLAN §12.6, §12.9.
  *
- * An instrument panel, not a website. Fixed viewport, panels scroll internally,
- * vitals always visible, keyboard-first.
+ * **Four workspaces, not fourteen screens.** The previous shell listed every
+ * module as its own nav entry, which put four permanently empty screens in
+ * front of the operator: Overview, Positions, Blotter and Reconcile all read
+ * the paper-trading state that was deliberately removed, so `/book` returns an
+ * empty book, `/equity` an empty curve and `/reconciliation` `checked: false`.
+ * A screen that is always blank is worse than one that is absent — it teaches
+ * you to stop looking at screens.
  *
- * Screens are deliberately few. §13.8 is explicit that the polished UI belongs
- * at M8+, *after* the research loop has been operated, because you do not know
- * which screens matter until then. These are the ones paper trading actually
- * needs: what am I holding, what did I trade, what is the risk, does the broker
- * agree with me.
+ * What remains is organised by what you are doing rather than by which module
+ * implements it:
+ *
+ *     MARKET     watch      charts and watchlist
+ *     RESEARCH   evaluate   security, screener, cross-section, factors, risk
+ *     TRADE      act        the ticket and the venue's own book, together
+ *     SYSTEM     verify     data coverage, gates, limits
+ *
+ * **The symbol and venue belong to the shell.** Every screen used to ask for
+ * them separately, so moving between a chart, its analysis and a ticket meant
+ * typing the same ticker three times and risking three different answers to
+ * "which security am I looking at".
  */
 
-import { Fragment, useCallback, useEffect, useState } from "react";
-import { Analytics } from "./components/Analytics";
-import { Factors } from "./components/Factors";
-import { Tutorial } from "./components/Tutorial";
-import { RiskModel } from "./components/RiskModel";
-import { Screener } from "./components/Screener";
-import { OrderBook } from "./components/OrderBook";
-import { Research } from "./components/Research";
-import { Ticket } from "./components/Ticket";
-import { Workspace } from "./components/Workspace";
-import { VitalsBar, type Vitals } from "./components/VitalsBar";
-import { PriceChart } from "./components/Sparkline";
-import { Th } from "./components/Th";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AccountPanel, useAccount } from "./components/Account";
+import type { AccountAction } from "./components/AccountMenu";
+import { AccountSettings, type SettingsSection } from "./components/AccountSettings";
+import { AuthPage } from "./components/AuthPage";
+import { CommandBar } from "./components/CommandBar";
 import {
-  directionGlyph,
-  formatCount,
-  formatLevel,
-  formatMoney,
-  formatPercent,
-  formatPnL,
-  formatPrice,
-  signClass,
-} from "./format";
+  Detached,
+  DeskBar,
+  useDetached,
+  type DetachedKind,
+} from "./components/Detached";
+import { Icon, type IconName } from "./components/Icon";
+import { ResearchDesk, type ResearchTab } from "./components/ResearchDesk";
+import { SystemPanel } from "./components/SystemPanel";
+import type { ContractTerms } from "./components/Ticket";
+import { TradeDesk } from "./components/TradeDesk";
+import { Tutorial } from "./components/Tutorial";
+import { VitalsBar, type Vitals } from "./components/VitalsBar";
+import { Workspace as ChartWorkspace } from "./components/Workspace";
+import { DEFAULT_LOCATION, readLocation, writeLocation, type Location } from "./location";
 import "./tokens.css";
 import "./shell.css";
+import "./layout.css";
 import "./terminal.css";
 
-//: Marks that the tutorial has been shown, so it opens once and is a
-//: reference thereafter.
+//: Marks that the guide has been shown, so it opens once and is a reference
+//: thereafter.
 const SEEN_TUTORIAL = "neutron.tutorial.seen";
 
-type Screen =
-  | "tutorial"
-  | "charts"
-  | "research"
-  | "trade"
-  | "orderbook"
-  | "overview"
-  | "factors"
-  | "riskmodel"
-  | "screener"
-  | "analytics"
-  | "positions"
-  | "blotter"
-  | "risk"
-  | "reconcile";
+//: Marks that the operator chose to work without an account.
+const SKIPPED_AUTH = "neutron.auth.skipped";
 
-const SCREENS: {
-  id: Screen;
+type Workspace = "market" | "research" | "trade" | "system" | "tutorial";
+
+const WORKSPACES: {
+  id: Workspace;
   label: string;
-  icon: string;
+  icon: IconName;
   key: string;
-  group: "Analysis" | "Operations";
+  hint: string;
 }[] = [
-  { group: "Analysis", id: "tutorial", label: "Tutorial", icon: "?", key: "t" },
-  { group: "Analysis", id: "research", label: "Security", icon: "◎", key: "e" },
-  { group: "Analysis", id: "charts", label: "Charts", icon: "▥", key: "g" },
-  { group: "Analysis", id: "factors", label: "Factors", icon: "ƒ", key: "f" },
-  { group: "Analysis", id: "screener", label: "Screener", icon: "⌗", key: "s" },
-  { group: "Analysis", id: "analytics", label: "Analytics", icon: "∿", key: "a" },
-  { group: "Analysis", id: "riskmodel", label: "Risk model", icon: "◈", key: "m" },
-  { group: "Operations", id: "trade", label: "Trade", icon: "⇅", key: "d" },
-  { group: "Operations", id: "orderbook", label: "Order book", icon: "≡", key: "k" },
-  { group: "Operations", id: "overview", label: "Overview", icon: "◧", key: "o" },
-  { group: "Operations", id: "positions", label: "Positions", icon: "▤", key: "p" },
-  { group: "Operations", id: "blotter", label: "Blotter", icon: "▦", key: "b" },
-  { group: "Operations", id: "risk", label: "Risk", icon: "▲", key: "r" },
-  { group: "Operations", id: "reconcile", label: "Reconcile", icon: "⇄", key: "c" },
+  { id: "market", label: "Market", icon: "market", key: "1", hint: "Charts and watchlist" },
+  {
+    id: "research",
+    label: "Research",
+    icon: "research",
+    key: "2",
+    hint: "Evaluate a security or the universe",
+  },
+  { id: "trade", label: "Trade", icon: "trade", key: "3", hint: "Order entry and the venue book" },
+  {
+    id: "system",
+    label: "System",
+    icon: "system",
+    key: "4",
+    hint: "Data coverage, gates and limits",
+  },
+  { id: "tutorial", label: "Guide", icon: "guide", key: "5", hint: "How the research loop works" },
 ];
 
 export interface Position {
@@ -133,10 +136,10 @@ export interface Break {
 export interface ConsoleState {
   vitals: Vitals;
   /**
-   * Equity at the close of each completed paper cycle, oldest first. This is
-   * the M9 six-week clock: the drift between what a backtest promised and what
-   * actually happened is the single most informative number the system
-   * produces, and `/equity` served it to nobody until it was put on screen.
+   * Equity at the close of each completed cycle, oldest first. Empty until a
+   * broker is connected — the paper source that used to fill it was removed,
+   * and inventing a curve to make the screen look alive is exactly the failure
+   * the rest of this system exists to avoid.
    */
   equity: number[];
   positions: Position[];
@@ -149,211 +152,6 @@ export interface ConsoleState {
   latencyMs: number;
 }
 
-function Panel({
-  title,
-  children,
-  flush = false,
-  footer,
-}: {
-  title: string;
-  children: React.ReactNode;
-  flush?: boolean;
-  footer?: string;
-}) {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <span>{title}</span>
-      </div>
-      <div className={flush ? "panel-body flush" : "panel-body"}>{children}</div>
-      {footer ? <div className="panel-footer">{footer}</div> : null}
-    </section>
-  );
-}
-
-function PositionsTable({ positions }: { positions: Position[] }) {
-  if (positions.length === 0) {
-    return <div className="empty">No open positions.</div>;
-  }
-  return (
-    <table>
-      <thead>
-        <tr>
-          <Th>Symbol</Th>
-          <Th className="num">Qty</Th>
-          <Th className="num">Avg</Th>
-          <Th className="num">Last</Th>
-          <Th className="num">Unrealised</Th>
-          <Th className="num">% NAV</Th>
-          <Th>Cluster</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {positions.map((position) => (
-          <tr key={position.instrumentId}>
-            <td>{position.symbol}</td>
-            <td className={`num ${signClass(position.quantity)}`}>
-              {formatCount(position.quantity)}
-            </td>
-            <td className="num">{formatPrice(position.averagePrice)}</td>
-            <td className="num">{formatPrice(position.lastPrice)}</td>
-            <td className={`num ${signClass(position.unrealisedPnl)}`}>
-              {formatPnL(position.unrealisedPnl)} {directionGlyph(position.unrealisedPnl)}
-            </td>
-            <td className="num">{formatLevel(position.weightPct)}</td>
-            <td className="text-secondary">{position.cluster || "—"}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function Blotter({ trades }: { trades: Trade[] }) {
-  if (trades.length === 0) {
-    return <div className="empty">No trades today.</div>;
-  }
-  return (
-    <table>
-      <thead>
-        <tr>
-          <Th>Time</Th>
-          <Th>Symbol</Th>
-          <Th>Side</Th>
-          <Th className="num">Qty</Th>
-          <Th className="num">Price</Th>
-          <Th className="num">Costs</Th>
-          <Th>State</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {trades.map((trade, index) => (
-          <tr key={`${trade.eventTime}-${index}`}>
-            <td className="mono">{trade.eventTime}</td>
-            <td>{trade.symbol}</td>
-            <td className={trade.side === "BUY" ? "text-profit" : "text-loss"}>
-              {trade.side}
-            </td>
-            <td className="num">{formatCount(trade.quantity)}</td>
-            <td className="num">{formatPrice(trade.price)}</td>
-            <td className="num text-secondary">{formatPrice(trade.costs)}</td>
-            <td className="text-secondary">{trade.state}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function RiskTable({ rows }: { rows: RiskRow[] }) {
-  if (rows.length === 0) {
-    return <div className="empty">No limits configured.</div>;
-  }
-  return (
-    <table>
-      <thead>
-        <tr>
-          <Th>Limit</Th>
-          <Th className="num">Observed</Th>
-          <Th className="num">Threshold</Th>
-          <Th className="num">Used</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => {
-          // A null observation has no utilisation. Showing 0% would claim the
-          // budget is untouched when nothing measured it.
-          const used =
-            row.observed === null || row.threshold === 0
-              ? null
-              : row.observed / row.threshold;
-          return (
-            <tr key={row.name}>
-              <td>{row.name}</td>
-              <td className="num">{formatPrice(row.observed, 4)}</td>
-              <td className="num text-secondary">{formatPrice(row.threshold, 4)}</td>
-              <td className={`num ${row.passed === false ? "text-critical" : ""}`}>
-                {formatLevel(used)}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-/** Any non-empty diff is a red banner. An unexplained break halts trading (§9). */
-function Reconciliation({
-  breaks,
-  status,
-}: {
-  breaks: Break[];
-  status: ReconciliationStatus;
-}) {
-  // "Never checked" and "checked and clean" are different answers, and only
-  // one of them is reassuring. This panel used to give the reassuring one
-  // unconditionally, from an array nothing populated.
-  if (breaks.length === 0 && !status.checked) {
-    return (
-      <div className="empty">
-        Not reconciled. No paper cycle has run, so the broker and the book have
-        not been compared.
-      </div>
-    );
-  }
-  if (breaks.length === 0 && status.halted) {
-    return (
-      <div className="panel-body">
-        <strong className="text-critical">HALTED — {status.haltReason}</strong>
-        <p className="text-secondary">
-          The halt survives restarts by design. Only `--clear-halt` releases it.
-        </p>
-      </div>
-    );
-  }
-  if (breaks.length === 0) {
-    return (
-      <div className="empty">
-        Broker and internal records agree, as of cycle {status.cycles}.
-      </div>
-    );
-  }
-  return (
-    <>
-      <div className="panel-body" style={{ paddingBottom: 0 }}>
-        <strong className="text-critical">
-          {breaks.length} unexplained break(s) — halt new orders and find the cause.
-        </strong>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <Th>Instrument</Th>
-            <Th>Kind</Th>
-            <Th className="num">Internal</Th>
-            <Th className="num">Broker</Th>
-            <Th className="num">Diff</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {breaks.map((row) => (
-            <tr key={`${row.instrumentId}-${row.kind}`}>
-              <td>{row.instrumentId}</td>
-              <td className="text-critical">{row.kind}</td>
-              <td className="num">{formatPrice(row.internal, 4)}</td>
-              <td className="num">{formatPrice(row.broker, 4)}</td>
-              <td className="num text-critical">
-                {formatPrice(row.internal - row.broker, 4)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
 export function App({
   state,
   onKill,
@@ -361,41 +159,119 @@ export function App({
   state: ConsoleState;
   onKill: (reason: string) => void;
 }) {
-  // First visit opens the tutorial. What a new operator lacks is not button
+  // First visit opens the guide. What a new operator lacks is not button
   // locations but the order of operations, and someone who starts at the
   // backtester reads a rising curve as a discovery rather than as the first of
   // twelve questions.
-  const [screen, setScreen] = useState<Screen>(() => {
+  //: Read once from the URL. A refresh, a bookmark and a back button all
+  //: arrive the same way, so the console reconstructs itself from the address
+  //: rather than resetting to a default nobody asked for.
+  const initial = useMemo<Location>(() => readLocation(), []);
+
+  const [workspace, setWorkspace] = useState<Workspace>(() => {
+    if (window.location.hash) return initial.workspace;
     try {
-      return window.localStorage.getItem(SEEN_TUTORIAL) ? "factors" : "tutorial";
+      return window.localStorage.getItem(SEEN_TUTORIAL) ? "market" : "tutorial";
     } catch {
       // Private browsing and some hardened configurations throw on access.
       // Losing the preference is harmless; failing to render is not.
-      return "factors";
+      return "market";
     }
   });
+  const [tab, setTab] = useState<ResearchTab>(initial.tab as ResearchTab);
 
   useEffect(() => {
-    if (screen !== "tutorial") return;
+    if (workspace !== "tutorial") return;
     try {
       window.localStorage.setItem(SEEN_TUTORIAL, "1");
     } catch {
       /* see above */
     }
-  }, [screen]);
-  // Set when a screener row is clicked, so the analytics screen opens on that
-  // name. Keyed on the component so it remounts and refetches.
-  const [picked, setPicked] = useState<string | null>(null);
-  //: Which exchange the analysis screens read. Held in the shell so moving
-  //: between Security and Trade does not silently switch venue underneath a
-  //: symbol that exists on only one of them.
-  const [venue, setVenue] = useState("NSE");
+  }, [workspace]);
 
-  // Keyboard-first: `g` then a letter. The mouse is optional (§12.8).
+  //: Symbol, venue and contract live here so every workspace is looking at the
+  //: same security. Held in the shell rather than per screen, because the
+  //: alternative is a chart on one name and a ticket on another with nothing
+  //: on screen saying so.
+  const [symbol, setSymbol] = useState(initial.symbol);
+  const [venue, setVenue] = useState(initial.venue);
+  const [contract, setContract] = useState<ContractTerms | null>(null);
+
+  //: Whole features living in their own OS windows. Several of the same
+  //: feature are allowed on purpose — three Security windows on three symbols
+  //: is the layout a multi-monitor desk actually wants.
+  const detached = useDetached();
+
+  //: Who is signed in, and which account surface is showing. `null` means the
+  //: console itself; the auth and settings pages take over the whole window
+  //: because neither belongs in a dropdown.
+  const { status: accountStatus, refresh: refreshAccount, signOut } = useAccount();
+  const [accountView, setAccountView] = useState<"none" | "auth" | "settings">(initial.account);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(
+    initial.section as SettingsSection,
+  );
+  //: Set once the operator has chosen to work without an account, so the auth
+  //: page does not reappear on every status refresh.
+  const [skippedAuth, setSkippedAuth] = useState(() => {
+    // Remembered, so "continue without an account" is answered once rather
+    // than on every reload.
+    try {
+      return window.localStorage.getItem(SKIPPED_AUTH) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const onAccountAction = useCallback(
+    (action: AccountAction) => {
+      if (action === "signout") {
+        void signOut();
+        return;
+      }
+      if (action === "signin") {
+        setAccountView("auth");
+        return;
+      }
+      const section: SettingsSection =
+        action === "broker" ? "broker" : action === "preferences" ? "preferences" : "profile";
+      setSettingsSection(section);
+      setAccountView("settings");
+    },
+    [signOut],
+  );
+
+  //: Preferences arrive from the signed-in account. Applied rather than
+  //: merged into component defaults, so signing in on a second machine gives
+  //: the same console rather than a different one that happens to look alike.
+  const applySettings = useCallback(
+    (settings: Record<string, unknown>) => {
+      // The URL wins. A link that names a venue is an instruction; a saved
+      // preference is a default, and a default must not overrule the thing
+      // the operator just opened.
+      if (initial.venue !== DEFAULT_LOCATION.venue) return;
+      const preferred = settings.default_venue;
+      if (preferred === "NSE" || preferred === "BSE") setVenue(preferred);
+    },
+    [initial.venue],
+  );
+
+  useEffect(() => {
+    if (accountStatus?.account) applySettings(accountStatus.account.settings);
+  }, [accountStatus, applySettings]);
+
+  const pickSymbol = useCallback((next: string) => {
+    setSymbol(next);
+    // A new name is not the old contract. Leaving it set would aim the ticket
+    // at an option on a security you are no longer looking at.
+    setContract(null);
+  }, []);
+
+  // Keyboard-first: a digit per workspace. The mouse is optional (§12.8).
   const handleKey = useCallback((event: KeyboardEvent) => {
     if (event.target instanceof HTMLInputElement) return;
-    const match = SCREENS.find((s) => s.key === event.key);
-    if (match) setScreen(match.id);
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const match = WORKSPACES.find((w) => w.key === event.key);
+    if (match) setWorkspace(match.id);
   }, []);
 
   useEffect(() => {
@@ -403,177 +279,181 @@ export function App({
     return () => window.removeEventListener("keydown", handleKey);
   }, [handleKey]);
 
-  const totalUnrealised = state.positions.reduce((sum, p) => sum + p.unrealisedPnl, 0);
+  //: Keep the address in step with the console. `replaceState` rather than a
+  //: hash assignment, so moving between workspaces does not fill the back
+  //: button with a dozen entries nobody wants to walk through.
+  useEffect(() => {
+    const next = writeLocation({
+      workspace,
+      tab,
+      symbol,
+      venue,
+      account: accountView,
+      section: settingsSection,
+    });
+    if (next !== window.location.hash) {
+      window.history.replaceState(null, "", next);
+    }
+  }, [workspace, tab, symbol, venue, accountView, settingsSection]);
+
+  //: And the other direction, for the back button and a pasted link.
+  useEffect(() => {
+    const onHashChange = () => {
+      const there = readLocation();
+      setWorkspace(there.workspace);
+      setTab(there.tab as ResearchTab);
+      setSymbol(there.symbol);
+      setVenue(there.venue);
+      setAccountView(there.account);
+      setSettingsSection(there.section as SettingsSection);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  //: Shown before the console on a fresh install, and whenever the operator
+  //: asks for it. Not a lock — the page says so itself — but the right first
+  //: screen when no account exists yet.
+  const needsAuth =
+    accountView === "auth" ||
+    (!skippedAuth &&
+      accountStatus !== null &&
+      accountStatus.accounts_available &&
+      !accountStatus.signed_in);
+
+  if (needsAuth) {
+    return (
+      <AuthPage
+        userCount={accountStatus?.user_count ?? 0}
+        apiTokenConfigured={accountStatus?.api_token_configured ?? false}
+        accountsAvailable={accountStatus?.accounts_available ?? false}
+        backend={accountStatus?.backend ?? "postgres"}
+        onAuthenticated={() => {
+          setAccountView("none");
+          void refreshAccount();
+        }}
+        onSkip={() => {
+          setSkippedAuth(true);
+          try {
+            window.localStorage.setItem(SKIPPED_AUTH, "1");
+          } catch {
+            /* the choice is a convenience; failing to render is not */
+          }
+          setAccountView("none");
+        }}
+      />
+    );
+  }
+
+  if (accountView === "settings") {
+    return (
+      <AccountSettings
+        account={accountStatus?.account ?? null}
+        section={settingsSection}
+        onSection={setSettingsSection}
+        onClose={() => setAccountView("none")}
+        onChanged={() => void refreshAccount()}
+      />
+    );
+  }
 
   return (
     <div className="shell">
-      <VitalsBar vitals={state.vitals} onKill={onKill} />
+      <CommandBar symbol={symbol} venue={venue} onSymbol={pickSymbol} onVenue={setVenue}>
+        <VitalsBar vitals={state.vitals} onKill={onKill} />
+      </CommandBar>
 
       <div className="shell-body">
-        <nav className="nav" aria-label="Screens">
-          {SCREENS.map((item, index) => (
-            <Fragment key={item.id}>
-              {index === 0 || SCREENS[index - 1]?.group !== item.group ? (
-                <div className="nav-group">{item.group}</div>
-              ) : null}
-            <button
-              type="button"
-              title={`${item.label} (${item.key})`}
-              aria-current={screen === item.id ? "page" : undefined}
-              onClick={() => setScreen(item.id)}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span className="nav-label">{item.label}</span>
-              <span className="nav-key">{item.key}</span>
-            </button>
-            </Fragment>
+        <nav className="rail" aria-label="Workspaces">
+          {WORKSPACES.map((item) => (
+            <div key={item.id} className="rail-slot">
+              <button
+                type="button"
+                className={workspace === item.id ? "rail-item on" : "rail-item"}
+                onClick={() => setWorkspace(item.id)}
+                title={`${item.hint}  (${item.key})`}
+                aria-current={workspace === item.id ? "page" : undefined}
+              >
+                <span className="rail-icon">
+                  <Icon name={item.icon} size={1.15} />
+                </span>
+                <span className="rail-label">{item.label}</span>
+              </button>
+              {item.id !== "tutorial" && (
+                <button
+                  type="button"
+                  className="rail-detach"
+                  onClick={() => detached.open(item.id as DetachedKind, symbol, venue)}
+                  title={`Open ${item.label} in a new window — as many as you like`}
+                  aria-label={`Open ${item.label} in a new window`}
+                >
+                  <Icon name="popout" />
+                </button>
+              )}
+            </div>
           ))}
+          <AccountPanel status={accountStatus} onAction={onAccountAction} />
         </nav>
 
-        {screen === "overview" ? (
-          <div className="workspace overview">
-            <Panel
-              title="Paper equity"
-              flush
-              footer={
-                state.equity.length < 2
-                  ? `${state.equity.length} cycle(s) — the curve needs two`
-                  : `${state.equity.length} cycles · ${formatMoney(
-                      state.equity[state.equity.length - 1],
-                    )}`
-              }
-            >
-              {state.equity.length < 2 ? (
-                <div className="empty">
-                  Not enough cycles to plot. One run per session; the M9 gate
-                  wants six weeks of them.
-                </div>
-              ) : (
-                <PriceChart closes={state.equity} label="paper equity" />
-              )}
-            </Panel>
-            <Panel
-              title="Positions"
-              flush
-              footer={`${state.positions.length} open · unrealised ${formatPnL(totalUnrealised)}`}
-            >
-              <PositionsTable positions={state.positions} />
-            </Panel>
-            <Panel title="Risk" flush>
-              <RiskTable rows={state.risk} />
-            </Panel>
-            <Panel title="Today's fills" flush footer={`${state.trades.length} fill(s)`}>
-              <Blotter trades={state.trades} />
-            </Panel>
-            <Panel title="Reconciliation" flush>
-              <Reconciliation breaks={state.breaks} status={state.reconciliation} />
-            </Panel>
-          </div>
-        ) : (
-          <div className="workspace">
-            {screen === "research" ? (
-              <Panel title="Security analysis" flush>
-                <Research
-                  symbol={picked ?? ""}
-                  venue={venue}
-                  onSymbolChange={setPicked}
-                  onVenueChange={setVenue}
-                  onTrade={(s) => {
-                    setPicked(s);
-                    setScreen("trade");
-                  }}
-                />
-              </Panel>
-            ) : null}
-            {screen === "charts" ? (
-              <Panel title="Charts" flush>
-                <Workspace
-                  onTrade={(symbol) => {
-                    setPicked(symbol);
-                    setScreen("trade");
-                  }}
-                />
-              </Panel>
-            ) : null}
-            {screen === "trade" ? (
-              <Panel title="Order ticket" flush>
-                <Ticket symbol={picked ?? ""} onSymbolChange={setPicked} />
-              </Panel>
-            ) : null}
-            {screen === "orderbook" ? (
-              <Panel title="Order book" flush>
-                <OrderBook />
-              </Panel>
-            ) : null}
-            {screen === "tutorial" ? (
-              <Panel title="How this system works" flush>
-                <Tutorial onDismiss={() => setScreen("factors")} />
-              </Panel>
-            ) : null}
-            {screen === "factors" ? (
-              <Panel title="Factor research" flush>
-                <Factors />
-              </Panel>
-            ) : null}
-            {screen === "riskmodel" ? (
-              <Panel title="Risk decomposition" flush>
-                <RiskModel />
-              </Panel>
-            ) : null}
-            {screen === "screener" ? (
-              <Panel title="Screener" flush>
-                <Screener
-                  onPick={(symbol) => {
-                    setPicked(symbol);
-                    setScreen("research");
-                  }}
-                />
-              </Panel>
-            ) : null}
-            {screen === "analytics" ? (
-              <Panel title="Analytics" flush>
-                <Analytics key={picked ?? "default"} initialSymbols={picked ?? undefined} />
-              </Panel>
-            ) : null}
-            {screen === "positions" ? (
-              <Panel title="Positions" flush footer={`${state.positions.length} open`}>
-                <PositionsTable positions={state.positions} />
-              </Panel>
-            ) : null}
-            {screen === "blotter" ? (
-              <Panel title="Blotter" flush footer={`${state.trades.length} fill(s)`}>
-                <Blotter trades={state.trades} />
-              </Panel>
-            ) : null}
-            {screen === "risk" ? (
-              <Panel title="Risk limits" flush>
-                <RiskTable rows={state.risk} />
-              </Panel>
-            ) : null}
-            {screen === "reconcile" ? (
-              <Panel title="Reconciliation" flush>
-                <Reconciliation breaks={state.breaks} status={state.reconciliation} />
-              </Panel>
-            ) : null}
-          </div>
-        )}
+        <main className="stage">
+          <DeskBar state={detached} symbol={symbol} venue={venue} />
+
+          {workspace === "market" && (
+            <ChartWorkspace
+              onTrade={(picked) => {
+                pickSymbol(picked);
+                setWorkspace("trade");
+              }}
+            />
+          )}
+
+          {workspace === "research" && (
+            <ResearchDesk
+              tab={tab}
+              onTab={setTab}
+              symbol={symbol}
+              venue={venue}
+              onSymbol={pickSymbol}
+              onVenue={setVenue}
+              onTrade={(picked) => {
+                pickSymbol(picked);
+                setWorkspace("trade");
+              }}
+              onTradeContract={(picked, terms) => {
+                setSymbol(picked);
+                setContract(terms);
+                setWorkspace("trade");
+              }}
+            />
+          )}
+
+          {workspace === "trade" && (
+            <TradeDesk
+              symbol={symbol}
+              onSymbolChange={pickSymbol}
+              contract={contract}
+              onContractChange={setContract}
+            />
+          )}
+
+          {workspace === "system" && <SystemPanel />}
+
+          {workspace === "tutorial" && (
+            <div className="guide">
+              <Tutorial onDismiss={() => setWorkspace("market")} />
+            </div>
+          )}
+        </main>
       </div>
 
-      <footer className="status">
-        {/* Not cosmetic: this is what stops a test order reaching production. */}
-        <span className={`env-badge env-${state.environment}`}>
-          {state.environment.toUpperCase()}
-        </span>
-        {/* No build stamp is served yet. An em dash says so; "unknown"
-            truncated to seven characters looks like a real short SHA. */}
-        <span className="mono">
-          {state.gitSha === "unknown" ? "—" : state.gitSha.slice(0, 7)}
-        </span>
-        <span>latency {state.latencyMs.toFixed(0)}ms</span>
-        <span className="text-secondary">
-          drawdown {formatPercent(state.vitals.drawdown)}
-        </span>
+      <footer className="statusbar">
+        <span className="mono">{venue}</span>
+        <span className="muted">{symbol || "No security"}</span>
+        <span className="muted">{WORKSPACES.find((w) => w.id === workspace)?.hint ?? ""}</span>
+        <span className="status-right muted">⌃K Search · 1–5 Workspaces · ⧉ Detach</span>
       </footer>
+
+      <Detached state={detached} />
     </div>
   );
 }

@@ -49,6 +49,8 @@ export interface ChartProps {
   venue?: string;
   /** Sessions to load. 0 is the whole panel. */
   sessions?: number;
+  /** Candle size. Daily and weekly come from the panel; the rest need a broker. */
+  interval?: string;
   /**
    * Poll the vendor for a delayed last-traded price and show it beside the
    * close. Off by default: it is a network call per pane, and a six-pane
@@ -138,6 +140,7 @@ export function Chart({
   symbol,
   venue = "NSE",
   sessions = 0,
+  interval = "1d",
   live = false,
   overlays = [20, 50, 200],
   logScale = false,
@@ -169,8 +172,9 @@ export function Chart({
     setLoading(true);
     setError("");
     fetch(
-      `/api/security/${encodeURIComponent(symbol)}/ohlc` +
-        `?sessions=${sessions}&venue=${encodeURIComponent(venue)}`,
+      `/api/security/${encodeURIComponent(symbol)}/candles` +
+        `?sessions=${sessions}&venue=${encodeURIComponent(venue)}` +
+        `&interval=${encodeURIComponent(interval)}`,
     )
       .then(async (response) => {
         if (!response.ok) {
@@ -196,7 +200,7 @@ export function Chart({
     return () => {
       cancelled = true;
     };
-  }, [symbol, sessions, venue]);
+  }, [symbol, sessions, venue, interval]);
 
   //: The last candle is the last *close*, which mid-session is hours old. The
   //: vendor price is delayed too, and its own age is shown rather than implied:
@@ -378,7 +382,11 @@ export function Chart({
       const offset = Math.floor((k * (visible.length - 1)) / Math.max(labels - 1, 1));
       const candle = visible[offset];
       if (!candle) continue;
-      const text = candle.date.slice(2);
+      // A daily bar is labelled by date; an intraday one by time, because
+      // twenty candles all reading the same date says nothing.
+      const text = candle.date.includes("T")
+        ? candle.date.slice(11, 16)
+        : candle.date.slice(2, 10);
       const w = ctx.measureText(text).width;
       const x = toX(from + offset) - w / 2;
       ctx.fillText(text, Math.min(Math.max(x, 2), width - PADDING.right - w), height - 6);
@@ -492,7 +500,7 @@ export function Chart({
         )}
         {active ? (
           <>
-            <span className="chart-date">{active.date}</span>
+            <span className="chart-date">{active.date.replace("T", " ").slice(0, 16)}</span>
             <span>
               O <b>{active.open.toFixed(2)}</b>
             </span>
@@ -516,12 +524,12 @@ export function Chart({
         ) : (
           <span className="chart-hint">
             {!symbol
-              ? "pick a symbol"
+              ? "No symbol selected"
               : loading
                 ? "loading…"
                 : error
                   ? error
-                  : "scroll to zoom · drag to pan"}
+                  : "Scroll to zoom · Drag to pan"}
           </span>
         )}
         <span className="chart-legend">

@@ -1,18 +1,21 @@
 /**
- * A panel that can take over the window — MASTER_PLAN §12.6.
+ * A panel that can take over the window, or leave it — MASTER_PLAN §12.6.
  *
- * A dense grid answers "how does this name look overall". Reading a chain
- * strike by strike, or finding the session a drawdown started, needs the same
- * block with the whole screen. Both are the same content; only the space
- * differs, so this is a size toggle rather than a second component.
+ * Two different sizes of "show me more", because they answer different
+ * questions:
  *
- * **Expanding is not a route.** The block stays mounted and keeps its state —
- * a chart holds its zoom, a chain its expiry — because losing your place is
- * exactly what makes a "detail view" annoying enough that people stop using
- * it. Escape restores, and so does the same control.
+ *   expand    give this block the whole console
+ *   pop out   give this block its own OS window, for the second monitor
+ *
+ * **In both cases the block stays mounted.** Expanding is a size toggle and
+ * popping out is a portal, so a chart keeps its zoom and a chain keeps its
+ * expiry either way, and a popped-out panel still follows the symbol chosen in
+ * the main window — it is the same component, not a copy of it.
  */
 
 import { useEffect, type ReactNode } from "react";
+import { Icon } from "./Icon";
+import { Popout } from "./Popout";
 
 export interface BlockProps {
   title: string;
@@ -20,6 +23,9 @@ export interface BlockProps {
   id: string;
   expanded: boolean;
   onToggle: (id: string) => void;
+  /** The window this block is living in, if it has been popped out. */
+  popWindow?: Window | null;
+  onPopout?: (id: string, title: string) => void;
   /** Span the full grid width when not expanded. */
   wide?: boolean;
   /** Shown in the header, right of the title. */
@@ -27,7 +33,17 @@ export interface BlockProps {
   children: ReactNode;
 }
 
-export function Block({ title, id, expanded, onToggle, wide, meta, children }: BlockProps) {
+export function Block({
+  title,
+  id,
+  expanded,
+  onToggle,
+  popWindow = null,
+  onPopout,
+  wide,
+  meta,
+  children,
+}: BlockProps) {
   useEffect(() => {
     if (!expanded) return;
     const escape = (event: KeyboardEvent) => {
@@ -37,15 +53,24 @@ export function Block({ title, id, expanded, onToggle, wide, meta, children }: B
     return () => document.removeEventListener("keydown", escape);
   }, [expanded, id, onToggle]);
 
-  const classes = ["block", wide ? "block-wide" : "", expanded ? "block-expanded" : ""]
-    .filter(Boolean)
-    .join(" ");
+  const popped = popWindow != null;
 
-  return (
-    <article className={classes}>
-      <header className="panel-header block-head">
-        <span>{title}</span>
-        {meta}
+  const controls = (
+    <>
+      {meta}
+      {onPopout && (
+        <button
+          type="button"
+          className={popped ? "block-expand on" : "block-expand"}
+          onClick={() => onPopout(id, title)}
+          title={popped ? "Bring back into this window" : "Open in a separate window"}
+          aria-label={popped ? `Return ${title}` : `Open ${title} in a separate window`}
+          aria-pressed={popped}
+        >
+          <Icon name="popout" />
+        </button>
+      )}
+      {!popped && (
         <button
           type="button"
           className="block-expand"
@@ -54,10 +79,60 @@ export function Block({ title, id, expanded, onToggle, wide, meta, children }: B
           aria-label={expanded ? `Restore ${title}` : `Expand ${title}`}
           aria-pressed={expanded}
         >
-          {expanded ? "⤡" : "⤢"}
+          <Icon name={expanded ? "collapse" : "expand"} />
         </button>
+      )}
+    </>
+  );
+
+  const body = (
+    <article className={popped ? "block block-popped" : classesFor(wide, expanded)}>
+      <header className="panel-header block-head">
+        <span>{title}</span>
+        {controls}
       </header>
       {children}
     </article>
   );
+
+  if (popped && onPopout && popWindow) {
+    return (
+      <>
+        {/* The block keeps its slot in the grid so the layout does not reflow
+            around a hole, and the placeholder says where the panel went — a
+            block that simply vanished would read as a bug. */}
+        <article className={classesFor(wide, false)}>
+          <header className="panel-header block-head">
+            <span>{title}</span>
+            <button
+              type="button"
+              className="block-expand on"
+              onClick={() => onPopout(id, title)}
+              title="Bring back into this window"
+            >
+              <Icon name="popout" />
+            </button>
+          </header>
+          <p className="popout-note">
+            Open in a separate window
+            <button type="button" className="ghost" onClick={() => onPopout(id, title)}>
+              Return
+            </button>
+          </p>
+        </article>
+
+        <Popout title={title} target={popWindow} onClose={() => onPopout(id, title)}>
+          {body}
+        </Popout>
+      </>
+    );
+  }
+
+  return body;
+}
+
+function classesFor(wide: boolean | undefined, expanded: boolean): string {
+  return ["block", wide ? "block-wide" : "", expanded ? "block-expanded" : ""]
+    .filter(Boolean)
+    .join(" ");
 }

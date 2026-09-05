@@ -129,15 +129,15 @@ export function OrderBook() {
           ))}
         </div>
         <button type="button" className="ghost" onClick={() => void refresh()} disabled={busy}>
-          {busy ? "…" : "refresh"}
+          {busy ? "…" : "Refresh"}
         </button>
-        <span className="charts-hint">read from the broker, not from what this process sent</span>
+        <span className="charts-hint">Read from the broker</span>
       </header>
 
       <div className="blotter-body">
         {current.blocked.length > 0 && (
           <div className="gates">
-            <h4>Cannot read the broker</h4>
+            <h4>Broker unavailable</h4>
             <ul>
               {current.blocked.map((b) => (
                 <li key={b.gate}>
@@ -146,7 +146,7 @@ export function OrderBook() {
               ))}
             </ul>
             <p className="gates-note">
-              This is not an empty book. Nothing was asked of the exchange, so nothing is known.
+              No request was made to the exchange. This is not an empty book.
             </p>
           </div>
         )}
@@ -181,7 +181,7 @@ export function OrderBook() {
                       <td>{row.status}</td>
                       <td>
                         <button type="button" className="ghost danger" onClick={() => void cancel(row.broker_order_id)}>
-                          cancel
+                          Cancel
                         </button>
                       </td>
                     </tr>
@@ -189,7 +189,7 @@ export function OrderBook() {
                   {orders.rows.length === 0 && (
                     <tr>
                       <td colSpan={8} className="empty">
-                        The broker reports no orders today.
+                        No orders today
                       </td>
                     </tr>
                   )}
@@ -217,7 +217,7 @@ export function OrderBook() {
                   {positions.rows.length === 0 && (
                     <tr>
                       <td colSpan={3} className="empty">
-                        The broker reports no open positions.
+                        No open positions
                       </td>
                     </tr>
                   )}
@@ -251,7 +251,7 @@ export function OrderBook() {
                   {fills.rows.length === 0 && (
                     <tr>
                       <td colSpan={6} className="empty">
-                        The broker reports no fills today.
+                        No fills today
                       </td>
                     </tr>
                   )}

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The Neutron mark: two bars around a zero axis, one up and one down,
+       placed so the figure is unchanged by a 180° rotation about its centre.
+       A neutron carries no charge; a market-neutral book carries no market.
+
+       Three strokes, deliberately. An earlier version used four bars and
+       rasterised to a smudge at 16px, where the strokes and their gaps both
+       fell below two pixels — and a tab icon that cannot be told apart from
+       the one beside it has failed at the only job it has.
+
+       The dark plate is drawn in rather than left transparent, so the mark
+       keeps contrast on light browser chrome as well as dark. -->
+  <rect width="32" height="32" rx="7" fill="#0b0d10"/>
+  <g stroke="#4a9eff" stroke-linecap="round" fill="none">
+    <!-- Zero: thinner and dimmer than the bars, because it is the reference
+         they are measured against rather than one of them. -->
+    <line x1="6" y1="16" x2="26" y2="16" stroke-width="2" opacity="0.45"/>
+    <g stroke-width="5">
+      <line x1="11" y1="16" x2="11" y2="6"/>
+      <line x1="21" y1="16" x2="21" y2="26"/>
+    </g>
+  </g>
+</svg>

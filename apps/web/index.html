@@ -3,7 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- SVG first: it stays sharp at every size and follows the dark plate.
+         The emoji fallback is for the handful of contexts that still refuse
+         SVG favicons, so a tab never falls back to a blank page glyph. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="mask-icon" href="/favicon.svg" color="#4a9eff" />
+    <meta name="theme-color" content="#0b0d10" />
+
     <title>Neutron</title>
+    <meta name="description" content="Quantitative research and trading console for NSE and BSE." />
   </head>
   <body>
     <div id="root"></div>

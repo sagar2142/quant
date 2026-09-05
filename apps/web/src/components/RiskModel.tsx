@@ -33,6 +33,8 @@ interface RiskModelResult {
   names: number;
   illConditioned: boolean;
   condition: number;
+  marketSource: string;
+  benchmark: string;
   note: string;
 }
 
@@ -51,6 +53,8 @@ function camel<T>(value: unknown): T {
 
 export function RiskModel({ apiBase = "/api" }: { apiBase?: string }) {
   const [sessions, setSessions] = useState(756);
+  const [benchmark, setBenchmark] = useState("Nifty 50");
+  const [benchmarks, setBenchmarks] = useState<string[]>([]);
   const [result, setResult] = useState<RiskModelResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -59,7 +63,9 @@ export function RiskModel({ apiBase = "/api" }: { apiBase?: string }) {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${apiBase}/risk/model?sessions=${sessions}`);
+      const response = await fetch(
+        `${apiBase}/risk/model?sessions=${sessions}&benchmark=${encodeURIComponent(benchmark)}`,
+      );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setResult(camel<RiskModelResult>(await response.json()));
     } catch (cause) {
@@ -68,7 +74,14 @@ export function RiskModel({ apiBase = "/api" }: { apiBase?: string }) {
     } finally {
       setLoading(false);
     }
-  }, [apiBase, sessions]);
+  }, [apiBase, sessions, benchmark]);
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch(`${apiBase}/benchmarks`);
+      if (response.ok) setBenchmarks((await response.json()) as string[]);
+    })();
+  }, [apiBase]);
 
   useEffect(() => {
     void load();
@@ -87,6 +100,23 @@ export function RiskModel({ apiBase = "/api" }: { apiBase?: string }) {
           <option value={756}>3y window</option>
           <option value={1260}>5y window</option>
         </select>
+        {/* Beta is only as meaningful as the market it was measured against.
+            A midcap book measured against NIFTY 50 is being labelled by the
+            wrong market, and NSE publishes the right one in the same file. */}
+        <select
+          className="analytics-select factor-pick"
+          value={benchmark}
+          onChange={(event) => setBenchmark(event.target.value)}
+          aria-label="benchmark"
+          disabled={benchmarks.length === 0}
+        >
+          {benchmarks.length === 0 ? <option value="Nifty 50">Nifty 50</option> : null}
+          {benchmarks.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
         <span className="analytics-spacer" />
         {loading ? <span className="text-secondary">estimating…</span> : null}
       </div>
@@ -100,6 +130,17 @@ export function RiskModel({ apiBase = "/api" }: { apiBase?: string }) {
 
         {result?.present ? (
           <>
+            {/* Which market, in words. "72% market" means one thing against
+                NIFTY 50 and another against an equal-weight average of two
+                thousand mostly-small names, and the reader cannot tell them
+                apart from the number alone. */}
+            <div className="analytics-note">
+              {result.marketSource === "index"
+                ? `Market exposure is each name's trailing beta to ${result.benchmark}.`
+                : "No index in the lake, so the market factor is a column of ones — its slope " +
+                  "is the equal-weighted average return of every name that traded, which is a " +
+                  "smallcap-heavy proxy rather than a market. Run: python -m apps.cli.ingest_indices."}
+            </div>
             {/* The headline is the split, not the level. A 17% volatility means
                 little; 17% of which two thirds is market means a great deal. */}
             <div className="stat-row">

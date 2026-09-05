@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Block } from "./Block";
+import { usePopouts } from "./Popout";
 import { Chart } from "./Chart";
 import { MiniChart, drawdownSeries, histogram, returnSeries, rollingVol } from "./MiniChart";
 import { OptionChain } from "./OptionChain";
@@ -110,9 +111,21 @@ export interface ResearchProps {
   onSymbolChange: (symbol: string) => void;
   onVenueChange: (venue: string) => void;
   onTrade?: (symbol: string) => void;
+  /** Send an option contract to the ticket. */
+  onTradeContract?: (
+    symbol: string,
+    terms: { expiry: string; strike: string; right: "CE" | "PE" },
+  ) => void;
 }
 
-export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade }: ResearchProps) {
+export function Research({
+  symbol,
+  venue,
+  onSymbolChange,
+  onVenueChange,
+  onTrade,
+  onTradeContract,
+}: ResearchProps) {
   const [security, setSecurity] = useState<Security | null>(null);
   const [series, setSeries] = useState<Ohlc | null>(null);
   const [error, setError] = useState("");
@@ -124,6 +137,10 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
   //: Which block, if any, has taken over the window. One at a time: two
   //: expanded blocks is just the grid again, with fewer of them.
   const [expanded, setExpanded] = useState<string | null>(null);
+  //: Which blocks are in their own OS window. Separate from `expanded`: a
+  //: popped-out block has left this window entirely, so expanding it here
+  //: would be expanding a placeholder.
+  const popouts = usePopouts();
 
   const toggle = useCallback(
     (id: string) => setExpanded((current) => (current === id ? null : id)),
@@ -219,12 +236,15 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
         <span className="charts-hint">{loading ? "loading…" : error}</span>
       </header>
 
-      {!symbol && <p className="empty">Search for a security to analyse it.</p>}
+      {!symbol && <p className="empty">Select a security to begin.</p>}
       {error && symbol && <p className="ticket-message">{error}</p>}
 
       {symbol && security && (
         <div className={expanded ? "research-grid is-expanded" : "research-grid"}>
-          <Block title="Price" id="price" wide expanded={expanded === "price"} onToggle={toggle}>
+          <Block title="Price" id="price" wide expanded={expanded === "price"} onToggle={toggle}
+            popWindow={popouts.windows.get("price") ?? null}
+            onPopout={popouts.toggle}
+          >
             <Chart
               symbol={symbol}
               venue={venue}
@@ -233,7 +253,10 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             />
           </Block>
 
-          <Block title="Returns" id="returns" expanded={expanded === "returns"} onToggle={toggle}>
+          <Block title="Returns" id="returns" expanded={expanded === "returns"} onToggle={toggle}
+            popWindow={popouts.windows.get("returns") ?? null}
+            onPopout={popouts.toggle}
+          >
             <dl className="stats">
               {security.horizons.map((h) => (
                 <Stat key={h.label} label={h.label} value={pct(h.value)} tone={signOf(h.value)} />
@@ -243,7 +266,10 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             </dl>
           </Block>
 
-          <Block title="Range" id="range" expanded={expanded === "range"} onToggle={toggle}>
+          <Block title="Range" id="range" expanded={expanded === "range"} onToggle={toggle}
+            popWindow={popouts.windows.get("range") ?? null}
+            onPopout={popouts.toggle}
+          >
             <dl className="stats">
               <Stat label="52w high" value={num(security.high_52w)} />
               <Stat label="52w low" value={num(security.low_52w)} />
@@ -257,6 +283,8 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             id="riskadj"
             expanded={expanded === "riskadj"}
             onToggle={toggle}
+            popWindow={popouts.windows.get("riskadj") ?? null}
+            onPopout={popouts.toggle}
           >
             <dl className="stats">
               <Stat label="Sharpe" value={num(security.sharpe)} tone={signOf(security.sharpe)} />
@@ -266,7 +294,10 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             </dl>
           </Block>
 
-          <Block title="Drawdown" id="drawdown" expanded={expanded === "drawdown"} onToggle={toggle}>
+          <Block title="Drawdown" id="drawdown" expanded={expanded === "drawdown"} onToggle={toggle}
+            popWindow={popouts.windows.get("drawdown") ?? null}
+            onPopout={popouts.toggle}
+          >
             <MiniChart
               values={drawdown}
               kind="area"
@@ -285,6 +316,8 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             id="histogram"
             expanded={expanded === "histogram"}
             onToggle={toggle}
+            popWindow={popouts.windows.get("histogram") ?? null}
+            onPopout={popouts.toggle}
           >
             <MiniChart
               values={bars.counts}
@@ -300,7 +333,10 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             </dl>
           </Block>
 
-          <Block title="Tails" id="tails" expanded={expanded === "tails"} onToggle={toggle}>
+          <Block title="Tails" id="tails" expanded={expanded === "tails"} onToggle={toggle}
+            popWindow={popouts.windows.get("tails") ?? null}
+            onPopout={popouts.toggle}
+          >
             <dl className="stats">
               <Stat label="VaR 5%" value={pct(security.var_5)} tone="down" />
               <Stat label="CVaR 5%" value={pct(security.cvar_5)} tone="down" />
@@ -318,6 +354,8 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             id="vol"
             expanded={expanded === "vol"}
             onToggle={toggle}
+            popWindow={popouts.windows.get("vol") ?? null}
+            onPopout={popouts.toggle}
           >
             <MiniChart
               values={vol}
@@ -337,6 +375,8 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             id="stationarity"
             expanded={expanded === "stationarity"}
             onToggle={toggle}
+            popWindow={popouts.windows.get("stationarity") ?? null}
+            onPopout={popouts.toggle}
           >
             <dl className="stats">
               <Stat label="ADF p" value={num(security.adf_pvalue, 3)} />
@@ -347,9 +387,7 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
                 value={security.tradable_as_mean_reversion ? "yes" : "no"}
               />
             </dl>
-            <p className="block-note">
-              A property of the past, not a recommendation. Read it beside the tail statistics.
-            </p>
+            <p className="block-note">Historical property, not a recommendation.</p>
           </Block>
 
           <Block
@@ -357,6 +395,8 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
             id="autocorr"
             expanded={expanded === "autocorr"}
             onToggle={toggle}
+            popWindow={popouts.windows.get("autocorr") ?? null}
+            onPopout={popouts.toggle}
           >
             <dl className="stats">
               {Object.entries(security.autocorrelation).map(([lag, value]) => (
@@ -372,12 +412,22 @@ export function Research({ symbol, venue, onSymbolChange, onVenueChange, onTrade
               wide
               expanded={expanded === "chain"}
               onToggle={toggle}
-            >
-              <OptionChain underlying={symbol} />
+            popWindow={popouts.windows.get("chain") ?? null}
+            onPopout={popouts.toggle}
+          >
+              <OptionChain
+                underlying={symbol}
+                onTrade={
+                  onTradeContract ? (terms) => onTradeContract(symbol, terms) : undefined
+                }
+              />
             </Block>
           )}
 
-          <Block title="Verdict" id="verdict" wide expanded={expanded === "verdict"} onToggle={toggle}>
+          <Block title="Verdict" id="verdict" wide expanded={expanded === "verdict"} onToggle={toggle}
+            popWindow={popouts.windows.get("verdict") ?? null}
+            onPopout={popouts.toggle}
+          >
             <p className="verdict">{security.verdict}</p>
           </Block>
         </div>

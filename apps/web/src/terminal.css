@@ -52,6 +52,9 @@
 }
 
 .panel-bar {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  row-gap: 3px;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -208,6 +211,12 @@ button.ghost:disabled {
 .chart-readout {
   display: flex;
   align-items: center;
+  /* Never shrink. In a flex column beside a fixed-height canvas this row was
+     the only thing that could give, so it lost height and clipped its own
+     text rather than the chart losing a pixel. */
+  flex: 0 0 auto;
+  min-height: 20px;
+  line-height: 1.5;
   gap: var(--space-3);
   padding: 3px var(--space-2);
   font-family: var(--font-mono);
@@ -392,7 +401,13 @@ button.primary:disabled {
   cursor: wait;
 }
 
-button.danger {
+/* `:not(.ghost)` because a pane's close button is `ghost danger` and was
+   matching this rule: it took the filled red background and the 40px
+   `--control-danger` height meant for the halt confirmation, which made a
+   small × the largest control in the chart bar and inflated the bar enough to
+   clip the readout row underneath it. Danger-filled and danger-outlined are
+   two different buttons and now say so. */
+button.danger:not(.ghost) {
   background: var(--critical);
   border: 0;
   border-radius: var(--radius-control);
@@ -1117,4 +1132,38 @@ table.grid .down {
 
 .block-expanded .chain-table {
   font-size: 12px;
+}
+
+/* ── option orders ─────────────────────────────────────────────────────────
+   A premium and an underlying exposure are different numbers, and the ticket
+   shows both because sizing against the premium alone is how a small outlay
+   becomes a large position without anyone deciding to. */
+
+.ticket-contract {
+  align-items: center;
+  background: var(--bg-elevated);
+  border-left: 2px solid var(--accent);
+  display: flex;
+  gap: var(--space-2);
+  justify-content: space-between;
+  padding: var(--space-2);
+}
+
+.ticket-figures dd.warn {
+  color: var(--warn);
+}
+
+.chain-buy {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 1px 4px;
+}
+
+.chain-buy:hover {
+  background: var(--accent);
+  color: #04121f;
 }

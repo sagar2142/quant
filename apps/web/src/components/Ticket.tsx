@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Icon } from "./Icon";
 
 const EQUITY_KEY = "neutron.ticket.equity";
 
@@ -50,6 +51,9 @@ interface Preview {
   symbol: string;
   instrument_id: string;
   last_close: string;
+  kind: string;
+  lot_size: string | null;
+  underlying_exposure: string | null;
   side: string;
   quantity: string;
   notional: string;
@@ -60,13 +64,23 @@ interface Preview {
   checks: Check[];
 }
 
+/** An option contract, when the ticket is aimed at one. */
+export interface ContractTerms {
+  expiry: string;
+  strike: string;
+  right: "CE" | "PE";
+}
+
 export interface TicketProps {
   /** Pre-filled from whichever chart sent you here. */
   symbol: string;
   onSymbolChange: (symbol: string) => void;
+  /** Set when a chain strike sent you here. Clearing it returns to equities. */
+  contract?: ContractTerms | null;
+  onContractChange?: (contract: ContractTerms | null) => void;
 }
 
-export function Ticket({ symbol, onSymbolChange }: TicketProps) {
+export function Ticket({ symbol, onSymbolChange, contract, onContractChange }: TicketProps) {
   const [status, setStatus] = useState<Status | null>(null);
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [quantity, setQuantity] = useState("");
@@ -134,8 +148,12 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
       limit_price: orderType === "LIMIT" ? limitPrice : null,
       reference_price: reference,
       equity,
+      kind: contract ? "OPTION" : "EQUITY",
+      expiry: contract?.expiry ?? null,
+      strike: contract?.strike ?? null,
+      right: contract?.right ?? null,
     }),
-    [symbol, side, quantity, orderType, limitPrice, equity],
+    [symbol, side, quantity, orderType, limitPrice, equity, contract],
   );
 
   const runPreview = async () => {
@@ -156,8 +174,18 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
     // last close. The server re-reads that close itself and measures the order
     // against it, so a screen left open overnight is caught by the price band
     // rather than trusted.
-    const reference =
-      orderType === "LIMIT" && limitPrice ? limitPrice : quote ? String(quote.last_close) : "";
+    // An option is priced from its own premium, which the server looks up from
+    // the contract terms — the underlying quote beside the ticket is the wrong
+    // number for it entirely.
+    const reference = contract
+      ? orderType === "LIMIT" && limitPrice
+        ? limitPrice
+        : "0"
+      : orderType === "LIMIT" && limitPrice
+        ? limitPrice
+        : quote
+          ? String(quote.last_close)
+          : "";
     if (!reference) {
       setBusy(false);
       setMessage(`no price for ${symbol} — it is not in the panel`);
@@ -227,11 +255,24 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
           <span>Symbol</span>
           <input
             value={symbol}
-            placeholder="e.g. the name you charted"
+            placeholder="Symbol"
             onChange={(event) => onSymbolChange(event.target.value.toUpperCase())}
             spellCheck={false}
           />
         </label>
+
+        {contract && (
+          <div className="ticket-contract">
+            <span className="mono">
+              {contract.expiry} · {contract.strike} {contract.right}
+            </span>
+            {onContractChange && (
+              <button type="button" className="ghost" onClick={() => onContractChange(null)}>
+                Equity
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="side-toggle">
           <button
@@ -262,10 +303,10 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
         </div>
 
         <label>
-          <span>Quantity</span>
+          <span>{contract ? "Quantity (whole lots)" : "Quantity"}</span>
           <input
             value={quantity}
-            placeholder="shares"
+            placeholder={contract ? "units, a multiple of the lot" : "shares"}
             onChange={(event) => setQuantity(event.target.value)}
             inputMode="numeric"
           />
@@ -284,7 +325,7 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
             <span>Limit price</span>
             <input
               value={limitPrice}
-              placeholder="price"
+              placeholder="Limit price"
               onChange={(event) => setLimitPrice(event.target.value)}
               inputMode="decimal"
             />
@@ -295,17 +336,14 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
           <span>Capital</span>
           <input
             value={equity}
-            placeholder="capital this is sized against"
+            placeholder="Account capital"
             onChange={(event) => setEquity(event.target.value)}
             inputMode="numeric"
           />
-          <small>
-            Every percentage limit is a fraction of this. There is no book to read it from — paper
-            trading was removed on purpose.
-          </small>
+          <small>Basis for position and exposure limits.</small>
         </label>
 
-        {quote && Number(quantity) > 0 && Number(equity) > 0 && (
+        {!contract && quote && Number(quantity) > 0 && Number(equity) > 0 && (
           <p className="ticket-value">
             ≈ {(Number(quantity) * quote.last_close).toLocaleString("en-IN", {
               maximumFractionDigits: 0,
@@ -342,9 +380,21 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
                 <dd className="mono">{preview.last_close}</dd>
               </div>
               <div>
-                <dt>Notional</dt>
+                <dt>{preview.kind === "OPTION" ? "Premium" : "Notional"}</dt>
                 <dd className="mono">{preview.notional}</dd>
               </div>
+              {preview.underlying_exposure && (
+                <div>
+                  <dt>Underlying exposure</dt>
+                  <dd className="mono warn">{preview.underlying_exposure}</dd>
+                </div>
+              )}
+              {preview.lot_size && (
+                <div>
+                  <dt>Lot size</dt>
+                  <dd className="mono">{preview.lot_size}</dd>
+                </div>
+              )}
               <div>
                 <dt>Est. costs</dt>
                 <dd className="mono">{preview.estimated_costs}</dd>
@@ -358,7 +408,9 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
             <ul className="check-list">
               {preview.checks.map((check) => (
                 <li key={check.name} className={check.passed ? "pass" : "fail"}>
-                  <span className="check-mark">{check.passed ? "✓" : "✗"}</span>
+                  <span className="check-mark">
+                    <Icon name={check.passed ? "check" : "cross"} />
+                  </span>
                   <span className="check-name">{check.name}</span>
                   <span className="check-detail">{check.detail}</span>
                 </li>
@@ -384,18 +436,18 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
                 </button>
               )
             ) : (
-              <p className="rejected">Risk engine rejected this order. It cannot be sent.</p>
+              <p className="rejected">Rejected by risk checks. Order cannot be submitted.</p>
             )}
           </>
         ) : (
-          <p className="empty">Enter an order and press Preview.</p>
+          <p className="empty">Enter order details to preview.</p>
         )}
 
         {message && <p className="ticket-message">{message}</p>}
 
         {blocked.length > 0 && (
           <div className="gates">
-            <h4>Not armed for live trading</h4>
+            <h4>Live trading unavailable</h4>
             <ul>
               {blocked.map((gate) => (
                 <li key={gate.name}>
@@ -403,9 +455,7 @@ export function Ticket({ symbol, onSymbolChange }: TicketProps) {
                 </li>
               ))}
             </ul>
-            <p className="gates-note">
-              Preview works regardless. Sending requires all four.
-            </p>
+            <p className="gates-note">Preview is always available. Submission requires all four.</p>
           </div>
         )}
       </div>

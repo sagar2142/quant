@@ -13,7 +13,7 @@
  * one is meant to be unmissable and impossible to hit by accident.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   directionGlyph,
   formatLevel,
@@ -99,6 +99,25 @@ function KillButton({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
+  const box = useRef<HTMLSpanElement | null>(null);
+
+  //: Clicking anywhere else puts the switch away.
+  //:
+  //: It used to stay armed until Escape or a confirm, so a stray click left a
+  //: text field occupying the command bar with no obvious way out — the one
+  //: control that must never be in the way was permanently in the way.
+  //:
+  //: The typed reason is deliberately kept. Dismissing is not cancelling: an
+  //: operator halfway through writing why they are halting should not lose it
+  //: to a misplaced click, and re-arming restores what they had.
+  useEffect(() => {
+    if (!confirming) return;
+    const away = (event: MouseEvent) => {
+      if (box.current && !box.current.contains(event.target as Node)) setConfirming(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [confirming]);
 
   if (engaged) {
     // No release button, deliberately. Engaging a halt is fail-safe; releasing
@@ -131,7 +150,7 @@ function KillButton({
   // Typed confirmation, never a bare button (§12.8). The reason is mandatory
   // because an unattributed halt cannot be reviewed afterwards.
   return (
-    <span className="kill-confirm">
+    <span className="kill-confirm" ref={box}>
       <input
         autoFocus
         value={typed}
