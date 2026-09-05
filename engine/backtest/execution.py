@@ -13,9 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
-
-import polars as pl
+from typing import TYPE_CHECKING, Any
 
 from core.instruments import InstrumentId
 from core.orders import Side
@@ -40,19 +38,25 @@ def execute_order(  # noqa: PLR0913, PLR0917 - one order, and all it needs to fi
     state: RunState,
     instrument_id: InstrumentId,
     quantity: Decimal,
-    execution_slice: pl.DataFrame,
+    row: dict[str, Any] | None,
     execution_ts: datetime,
 ) -> bool:
-    """Fill one order into the execution bar. Returns whether it filled."""
+    """Fill one order into the execution bar. Returns whether it filled.
+
+    Args:
+        row: The instrument's bar on the execution session, already resolved,
+            or None if it did not trade. Resolved by the caller because the
+            caller has the whole session and fills several orders from it — a
+            `filter` per order built a Polars plan per fill, which on a
+            seven-year run was more time than the fills themselves.
+    """
     portfolio, result = state.portfolio, state.result
-    rows = execution_slice.filter(pl.col("instrument_id") == instrument_id)
-    if rows.is_empty():
+    if row is None:
         # The instrument did not trade this session. Counted separately: a
         # delisting is not a defect in our order logic.
         result.orders_no_market += 1
         return False
 
-    row = rows.row(0, named=True)
     instrument = engine.instruments[instrument_id]
     bar = ExecutionBar(
         instrument=instrument,

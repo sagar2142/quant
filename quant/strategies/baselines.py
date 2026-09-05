@@ -26,7 +26,6 @@ from quant.strategies.base import MarketView, Strategy, StrategySpec, TargetWeig
 __all__ = [
     "BuyAndHold",
     "CrossSectionalMomentum",
-    "EqualWeight",
     "RandomEntry",
     "SmaCrossover",
 ]
@@ -56,29 +55,14 @@ class BuyAndHold(Strategy):
         self.gross = gross
 
     def generate(self, view: MarketView) -> TargetWeights:
-        names = [n for n in view.universe if n in view.latest_close()]
+        # Bound once. Inside the comprehension this ran per name.
+        observable = view.latest_close()
+        names = [n for n in view.universe if n in observable]
         if not names:
             return TargetWeights(view.as_of, {})
         count = self.universe_size or len(names)
         weight = self.gross / Decimal(count)
         return TargetWeights(view.as_of, dict.fromkeys(names, weight))
-
-
-class EqualWeight(BuyAndHold):
-    """Alias for readability where the rebalancing intent matters more than
-    the buy-and-hold framing."""
-
-    def __init__(self, gross: Decimal = Decimal(1)) -> None:
-        super().__init__(gross=gross)
-        self.spec = StrategySpec(
-            name="equal_weight",
-            universe="fixed",
-            timeframe="1d",
-            parameters={"gross": str(gross)},
-            lookback=1,
-            max_position=Decimal(1),
-            max_gross=gross,
-        )
 
 
 class SmaCrossover(Strategy):
@@ -195,10 +179,15 @@ class CrossSectionalMomentum(Strategy):
             series = view.series(name)
             if series.height < self.lookback_bars:
                 continue
-            closes = [float(c) for c in series["close"].to_list()]
+            # Two reads, not a copy. Materialising the whole column to index
+            # twice converted a thousand floats per name per bar — thirty-six
+            # million of them over a seven-year run — and discarded all but
+            # two. Indexing the Series is the same values in the same order.
+            closes = series["close"]
+            height = series.height
             # Return from lookback ago to skip_bars ago — the "12-1" window.
-            start = closes[-self.lookback_bars]
-            end = closes[-(self.skip_bars + 1)] if self.skip_bars else closes[-1]
+            start = float(closes[height - self.lookback_bars])
+            end = float(closes[height - 1 - self.skip_bars])
             if start <= 0:
                 continue
             scores[name] = end / start - 1
@@ -277,7 +266,8 @@ class RandomEntry(Strategy):
 
     def generate(self, view: MarketView) -> TargetWeights:
         # Sorted, so the draw does not depend on dict or set ordering.
-        names = sorted(n for n in view.universe if n in view.latest_close())
+        observable = view.latest_close()
+        names = sorted(n for n in view.universe if n in observable)
         if not names:
             return TargetWeights(view.as_of, {})
 

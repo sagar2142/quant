@@ -515,3 +515,121 @@ class TestBorrowIsChargedForTime:
         engine_ = engine(BuyAndHold(), borrow=BorrowModel(annual_rate=Decimal("0.25")))
         engine_._charge_borrow(flat, {IID: Decimal(1000)})
         assert flat.cash == Decimal(1_000_000)
+
+
+class TestLatestCloseCannotSeeTheDecisionBar:
+    """The look-ahead this nearly shipped as a speed-up.
+
+    `latest_close()` is now seeded by the engine instead of being recomputed
+    from a growing prefix on every bar — 92% of a backtest's runtime. The first
+    version seeded it from `last_marks`, the *valuation* mark, which includes
+    the decision session's own close because the ledger values the book at
+    today's price. What a strategy may see is `receive_time <= as_of`, which
+    excludes a bar that closed at 15:30 and published at 18:00 — today's among
+    them.
+
+    The run's return went from 3.61% to 4.64% and nothing failed. These pin the
+    distinction so the next person optimising this cannot make the trade
+    silently.
+    """
+
+    def _market(self):
+        model = NseEquityCostModel(slippage=NO_SLIPPAGE)
+        return MarketModel(
+            cost_model=model,
+            fill_model=NextOpenFill(model),
+            instruments=self._instruments(),
+        )
+
+    def _instruments(self):
+        return {
+            InstrumentId(i): Instrument(
+                instrument_id=InstrumentId(i),
+                symbol=i[-1],
+                asset_class=AssetClass.EQUITY,
+                exchange=Exchange.NSE,
+                currency=Currency.INR,
+                tick_size=Decimal("0.01"),
+            )
+            for i in ("NSE:A", "NSE:B")
+        }
+
+    def _panel(self):
+        """Two names, three sessions, published 2.5h after each close."""
+        import polars as pl
+
+        rows = []
+        for day, closes in enumerate([(100.0, 200.0), (110.0, 190.0), (121.0, 180.0)], start=1):
+            event = datetime(2024, 1, day, 10, 0, tzinfo=UTC)
+            for instrument_id, close in zip(("NSE:A", "NSE:B"), closes, strict=True):
+                rows.append(
+                    {
+                        "event_time": event,
+                        "receive_time": event + timedelta(hours=2, minutes=30),
+                        "instrument_id": instrument_id,
+                        "open": close,
+                        "high": close,
+                        "low": close,
+                        "close": close,
+                        "volume": 1e7,
+                    }
+                )
+        return pl.DataFrame(rows)
+
+    def test_the_view_never_carries_the_decision_session_close(self):
+        """The decision bar publishes after the decision, so it is not there."""
+        seen: list[dict] = []
+
+        class Recorder(BuyAndHold):
+            def generate(self, view):
+                seen.append(dict(view.latest_close()))
+                return super().generate(view)
+
+        engine = BacktestEngine(
+            strategy=Recorder(),
+            market=self._market(),
+            config=BacktestConfig(initial_cash=Decimal(100_000)),
+        )
+        engine.run(self._panel(), universe=("NSE:A", "NSE:B"))
+
+        assert len(seen) >= 2, "the strategy never ran twice"
+        # At the first decision nothing has published at all: session 1 closed
+        # at 10:00 and publishes at 12:30, so there is no observable close yet.
+        assert seen[0] == {}
+        # At the second, session 1 is out and session 2 is not — the decision
+        # bar's own close is still unpublished.
+        assert seen[1] == {"NSE:A": 100.0, "NSE:B": 200.0}
+        assert 110.0 not in seen[1].values()
+
+    def test_it_matches_what_the_view_history_says(self):
+        """The seeded answer and the one computed from the view's own rows are
+        the same dictionary. If they ever differ, the seed is a second source
+        of truth rather than a faster route to the first."""
+        import polars as pl
+
+        checked: list[bool] = []
+
+        class Recorder(BuyAndHold):
+            def generate(self, view):
+                from_rows = (
+                    view.history.sort("event_time")
+                    .group_by("instrument_id")
+                    .agg(pl.col("close").last())
+                )
+                expected = dict(
+                    zip(
+                        from_rows["instrument_id"].to_list(),
+                        from_rows["close"].to_list(),
+                        strict=True,
+                    )
+                )
+                checked.append(view.latest_close() == expected)
+                return super().generate(view)
+
+        engine = BacktestEngine(
+            strategy=Recorder(),
+            market=self._market(),
+            config=BacktestConfig(initial_cash=Decimal(100_000)),
+        )
+        engine.run(self._panel(), universe=("NSE:A", "NSE:B"))
+        assert checked and all(checked)

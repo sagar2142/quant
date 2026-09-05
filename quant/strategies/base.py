@@ -108,6 +108,22 @@ class MarketView:
     #: itself; reading it directly would hand a strategy the future.
     partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] | None = None
 
+    #: The last observable close per name, when the caller already knows it.
+    #: The engine does: it maintains exactly this for valuation, one session at
+    #: a time. Supplying it turns `latest_close` from a per-bar aggregate over
+    #: a growing prefix into a dictionary read.
+    #:
+    #: **Not a second source of truth.** It answers the same question from the
+    #: same rows; a view built without it computes the identical dictionary.
+    known_closes: dict[InstrumentId, float] | None = None
+
+    #: Memoised `latest_close`. Not part of the view's identity — it is derived
+    #: from fields that cannot change, so it is excluded from comparison and
+    #: from the repr.
+    _latest_close_cache: dict[InstrumentId, float] | None = field(
+        default=None, compare=False, repr=False
+    )
+
     def closes(self) -> pl.DataFrame:
         """Wide close-price matrix: one row per timestamp, one column per name.
 
@@ -136,7 +152,14 @@ class MarketView:
         if self.partition is not None:
             found = self.partition.get(instrument_id)
             if found is None:
-                return self.history.clear()
+                # Fall through to the filter rather than answering "no rows".
+                # The partition is built over the tradable universe, so a name
+                # outside it is absent from the index and present in the
+                # history — and returning an empty frame here would be a
+                # silently wrong answer to a legitimate question.
+                return self.history.filter(pl.col("instrument_id") == instrument_id).sort(
+                    "event_time"
+                )
             rows, receive_times = found
             # Binary search and slice, not a filter. A filter would be correct
             # and costs an expression per call — building `pl.lit` and a plan
@@ -156,19 +179,51 @@ class MarketView:
         """Most recent observable close per instrument.
 
         float, not Decimal: these feed statistics, not the ledger (§14.1.2).
+
+        **Memoised, and that is not an optimisation detail.** A view is one
+        decision point and its history cannot change, so this is a pure
+        function of an immutable object. It was 92% of a backtest's runtime:
+        strategies naturally write `[n for n in view.universe if n in
+        view.latest_close()]`, which re-runs a whole-panel sort and group-by
+        once per name. Hoisting it at each call site fixes each call site; the
+        cache fixes the shape of the mistake.
+
+        The engine supplies the answer directly, because it already has it: it
+        keeps a running last-seen close per name for valuation, updated one
+        session at a time. Recomputing the same dictionary here meant a sort
+        and group-by over a *growing* prefix on every bar, which is quadratic
+        in the length of the run. The two cannot disagree — both are the last
+        close observable at this decision point, from the same rows — and the
+        fallback below computes exactly that for a view built by hand.
         """
+        cached = self._latest_close_cache
+        if cached is not None:
+            return cached
+        if self.known_closes is not None:
+            return self.known_closes
+
+        found: dict[InstrumentId, float]
         if self.history.is_empty():
-            return {}
-        latest = (
-            self.history.sort("event_time").group_by("instrument_id").agg(pl.col("close").last())
-        )
-        return dict(
-            zip(
-                latest["instrument_id"].to_list(),
-                latest["close"].to_list(),
-                strict=True,
+            found = {}
+        else:
+            latest = (
+                self.history.sort("event_time")
+                .group_by("instrument_id")
+                .agg(pl.col("close").last())
             )
-        )
+            found = dict(
+                zip(
+                    latest["instrument_id"].to_list(),
+                    latest["close"].to_list(),
+                    strict=True,
+                )
+            )
+
+        # `object.__setattr__` because the dataclass is frozen, which is the
+        # point: the cache is derived from fields that cannot change, so it can
+        # never disagree with them.
+        object.__setattr__(self, "_latest_close_cache", found)
+        return found
 
     def bar_count(self) -> int:
         """Distinct timestamps observed. The engine uses this to honour lookback."""
@@ -179,6 +234,7 @@ class MarketView:
 
 def partition_by_instrument(
     history: pl.DataFrame,
+    only: tuple[InstrumentId, ...] | None = None,
 ) -> dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] | None:
     """Split a history once, for reuse across every bar of a run.
 
@@ -189,6 +245,14 @@ def partition_by_instrument(
     Built from the *unfiltered* history: each view applies its own cutoff, which
     is what lets one partition serve every decision point without leaking a
     later bar into an earlier one.
+
+    Args:
+        history: The whole run's rows.
+        only: Restrict the index to these instruments. The engine passes its
+            universe: splitting three thousand names to serve ten was a third
+            of a fast backtest's runtime, and `series` filters for anything not
+            indexed, so nothing becomes unanswerable — only slower, for the
+            names a run does not trade.
 
     Returns:
         None when any instrument's `receive_time` is not ascending in
@@ -201,8 +265,12 @@ def partition_by_instrument(
     if history.is_empty():
         return None
 
+    indexed = history if only is None else history.filter(pl.col("instrument_id").is_in(list(only)))
+    if indexed.is_empty():
+        return None
+
     partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]] = {}
-    for key, frame in history.partition_by(
+    for key, frame in indexed.partition_by(
         "instrument_id", as_dict=True, maintain_order=False
     ).items():
         ordered = frame.sort("event_time")

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -75,6 +76,20 @@ def _session_bounds(history: pl.DataFrame, timestamps: list[datetime]) -> list[p
     starts = np.searchsorted(column, wanted, side="left")
     ends = np.searchsorted(column, wanted, side="right")
     return [history.slice(int(a), int(b - a)) for a, b in zip(starts, ends, strict=True)]
+
+
+def _rows_by_instrument(rows: pl.DataFrame) -> dict[InstrumentId, dict[str, Any]]:
+    """One session's bars, keyed by instrument.
+
+    The execution path fills several orders from the same session, and looking
+    each one up with a `filter` built a Polars plan per fill. First row wins,
+    matching the `row(0)` the filter path took when a session carried more than
+    one bar for a name.
+    """
+    found: dict[InstrumentId, dict[str, Any]] = {}
+    for row in rows.to_dicts():
+        found.setdefault(row["instrument_id"], row)
+    return found
 
 
 def _visible_prefix(history: pl.DataFrame, timestamps: list[datetime]) -> list[pl.DataFrame]:
@@ -191,7 +206,7 @@ class BacktestEngine:
         # name per bar, and filtering the full frame each time made a backtest
         # quadratic in its own length — 78% of the runtime was polars `collect`.
         # The partition is unfiltered; each view applies its own cutoff.
-        partition = partition_by_instrument(history)
+        partition = partition_by_instrument(history, only=universe)
 
         # Row boundaries per session, and the prefix each decision can see.
         #
@@ -201,8 +216,32 @@ class BacktestEngine:
         # three scans were most of the runtime. The frame is sorted by
         # event_time, so a session is a contiguous slice and binary search
         # finds it; nothing about what a strategy can observe changes.
-        sessions = _session_bounds(history, timestamps)
+        # Marks are cut from a universe-filtered copy, not from the whole
+        # panel. Everything that reads them — valuation, borrow, sizing — is
+        # scoped to names the book can hold, so converting the other two
+        # thousand names in every session to `Decimal` was work whose result
+        # was discarded. The strategy's own view is still built from the
+        # unfiltered history, because a strategy may legitimately look outside
+        # its tradable set for context.
+        tradable = history.filter(pl.col("instrument_id").is_in(list(universe)))
+        sessions = _session_bounds(tradable, timestamps)
         visible = _visible_prefix(history, timestamps)
+
+        # The last close *observable* at each decision point, folded forward
+        # one prefix at a time.
+        #
+        # **Not `last_marks`.** That one is the valuation mark and includes the
+        # decision session's own close, because the ledger values the book at
+        # today's price. What a strategy may see is `receive_time <= as_of`,
+        # which excludes a bar that closed at 15:30 and published at 18:00 —
+        # today's close among them. Seeding a view from `last_marks` handed the
+        # strategy the very bar it was deciding on, and the run's return went
+        # from 3.61% to 4.64%: look-ahead, wearing the shape of an optimisation.
+        #
+        # The prefixes only grow, so each row is folded in once and the whole
+        # run costs one pass over the frame rather than one aggregate per bar.
+        observable_closes: dict[InstrumentId, float] = {}
+        consumed = 0
 
         # Stop one short: the final bar can never be an execution bar, so it can
         # never be a decision bar either.
@@ -215,6 +254,22 @@ class BacktestEngine:
 
             marks = self._marks_from(sessions[index])
             last_marks.update(marks)
+
+            if visible:
+                prefix = visible[index]
+                if prefix.height > consumed:
+                    # Sorted by (event_time, instrument_id), so a later row for
+                    # a name overwrites an earlier one and the dict ends up
+                    # holding each name's most recent observable close.
+                    fresh = prefix.slice(consumed, prefix.height - consumed)
+                    observable_closes.update(
+                        zip(
+                            fresh["instrument_id"].to_list(),
+                            fresh["close"].to_list(),
+                            strict=True,
+                        )
+                    )
+                    consumed = prefix.height
 
             # Charged before the bar is valued, so the cost of carrying a short
             # lands on the session it was carried through. One session per bar:
@@ -247,6 +302,10 @@ class BacktestEngine:
                 universe,
                 partition,
                 prefix=visible[index] if visible else None,
+                # A copy, so a strategy that mutates what it is handed cannot
+                # corrupt the next bar's view. Only on rebalance bars, so the
+                # copy is paid `n_sessions / rebalance_every` times.
+                known_closes=dict(observable_closes) if visible else None,
             )
             targets = self.strategy(view)
 
@@ -257,10 +316,17 @@ class BacktestEngine:
             orders = self.planner.plan(portfolio, targets.weights, marks, equity)
             result.orders_generated += len(orders)
 
-            execution_slice = sessions[index + 1]
+            # One index for the whole execution bar rather than a filter per
+            # order. Built only when there are orders to fill.
+            execution_rows = _rows_by_instrument(sessions[index + 1]) if orders else {}
             for instrument_id, quantity in orders:
                 if execute_order(
-                    self, state, instrument_id, quantity, execution_slice, execution_ts
+                    self,
+                    state,
+                    instrument_id,
+                    quantity,
+                    execution_rows.get(instrument_id),
+                    execution_ts,
                 ):
                     result.orders_filled += 1
 
@@ -278,7 +344,7 @@ class BacktestEngine:
 
     # ── internals ───────────────────────────────────────────────────────────
 
-    def _build_view(
+    def _build_view(  # noqa: PLR0913, PLR0917 - a decision point is its inputs
         self,
         history: pl.DataFrame,
         decision_ts: datetime,
@@ -286,6 +352,7 @@ class BacktestEngine:
         partition: dict[InstrumentId, tuple[pl.DataFrame, npt.NDArray[np.datetime64]]]
         | None = None,
         prefix: pl.DataFrame | None = None,
+        known_closes: dict[InstrumentId, float] | None = None,
     ) -> MarketView:
         """Everything observable at the decision point, and nothing else.
 
@@ -304,6 +371,10 @@ class BacktestEngine:
                 back to the filter when it is not, because a prefix would then
                 be the wrong rows rather than merely a slower way to the right
                 ones.
+            known_closes: The running last-seen close per name, which the loop
+                already maintains for valuation. Without it `latest_close`
+                re-aggregates a growing prefix on every bar — 92% of a
+                backtest's runtime, and quadratic in the length of the run.
         """
         decision_time = as_decision_time(decision_ts)
         observable = (
@@ -316,6 +387,7 @@ class BacktestEngine:
             history=observable,
             universe=universe,
             partition=partition,
+            known_closes=known_closes,
         )
 
     def _charge_borrow(self, portfolio: Portfolio, marks: dict[InstrumentId, Decimal]) -> None:
@@ -341,10 +413,17 @@ class BacktestEngine:
 
     @staticmethod
     def _marks_from(rows: pl.DataFrame) -> dict[InstrumentId, Decimal]:
-        """Closes for one session, from rows already isolated."""
+        """Closes for one session, from rows already isolated.
+
+        Two column reads and a zip, not `to_dicts()`. The dict-per-row form
+        allocated one dictionary per bar per name — three million of them on a
+        seven-year panel — to read two fields from each.
+        """
         return {
-            row["instrument_id"]: _to_decimal(row["close"])
-            for row in rows.select("instrument_id", "close").to_dicts()
+            instrument_id: _to_decimal(close)
+            for instrument_id, close in zip(
+                rows["instrument_id"].to_list(), rows["close"].to_list(), strict=True
+            )
         }
 
     def _apply_corporate_actions(
