@@ -64,16 +64,39 @@ def live_order(**overrides) -> Order:
     return Order(**{**defaults, **overrides})
 
 
+def _pin_settings(monkeypatch, replacement: Settings) -> Settings:
+    """Bind `replacement` everywhere the live guard reads settings from.
+
+    Every one of these modules did `from core.config import settings` at import
+    time, so patching `core.config.settings` alone rebinds nothing they use.
+    That mattered more than it looks: with `NEUTRON_ENV=live` in a developer's
+    `.env`, the tests that prove live trading is *refused* were quietly reading
+    a live configuration and asserting against it — the safety property went
+    untested on exactly the machine where it is load-bearing.
+    """
+    import core.config
+    import core.secrets
+    import trading.execution.kite
+
+    for module in (core.config, core.secrets, trading.execution.kite):
+        monkeypatch.setattr(module, "settings", replacement)
+    return replacement
+
+
 @pytest.fixture
 def live_env(monkeypatch):
     """A correctly configured live environment. Deliberately awkward to reach."""
-    import core.config
-    import trading.execution.kite
+    return _pin_settings(monkeypatch, Settings(env=Environment.LIVE, live_enabled=True))
 
-    enabled = Settings(env=Environment.LIVE, live_enabled=True)
-    monkeypatch.setattr(core.config, "settings", enabled)
-    monkeypatch.setattr(trading.execution.kite, "settings", enabled)
-    return enabled
+
+@pytest.fixture
+def dev_env(monkeypatch):
+    """The shipped default: not live, not enabled.
+
+    Explicit rather than ambient, so the refusal tests below assert the guard
+    itself instead of whatever happens to be in the environment.
+    """
+    return _pin_settings(monkeypatch, Settings(env=Environment.DEV, live_enabled=False))
 
 
 class TestSecretValue:
@@ -132,35 +155,31 @@ class TestCredentialLoading:
 class TestBrokerCredentialsRefuseOutsideLive:
     """Guard 1, at the credential layer."""
 
-    def test_dev_environment_cannot_load_broker_credentials(self):
-        # settings defaults to env=dev, live_enabled=false.
+    def test_dev_environment_cannot_load_broker_credentials(self, dev_env):
+        """The shipped default refuses. Neither key turned."""
+        assert not dev_env.live_enabled
         with pytest.raises(PermissionError, match="live trading blocked"):
             load_broker_credentials("kite")
 
     def test_live_env_without_explicit_enable_is_refused(self, monkeypatch):
-        import core.config
-
-        monkeypatch.setattr(
-            core.config, "settings", Settings(env=Environment.LIVE, live_enabled=False)
-        )
+        """One key turned is not enough — §21 requires both."""
+        _pin_settings(monkeypatch, Settings(env=Environment.LIVE, live_enabled=False))
         with pytest.raises(PermissionError, match="live_enabled"):
             load_broker_credentials("kite")
 
     def test_enabled_flag_alone_is_not_enough(self, monkeypatch):
-        import core.config
-
-        monkeypatch.setattr(
-            core.config, "settings", Settings(env=Environment.DEV, live_enabled=True)
-        )
+        """And the other key alone is not either."""
+        _pin_settings(monkeypatch, Settings(env=Environment.DEV, live_enabled=True))
         with pytest.raises(PermissionError):
             load_broker_credentials("kite")
 
 
 class TestKiteBrokerGuards:
-    def test_construction_refused_outside_live(self):
+    def test_construction_refused_outside_live(self, dev_env):
         """Guard 1: a misconfigured process dies at startup, not mid-session."""
         from trading.execution.kite import KiteBroker
 
+        assert not dev_env.live_enabled
         with pytest.raises(PermissionError, match="live trading blocked"):
             KiteBroker(CREDENTIALS, INSTRUMENTS)
 
@@ -602,3 +621,36 @@ class TestCredentialsNeverSerialised:
         """A credential must not slip into a log payload or an API response."""
         with pytest.raises(TypeError):
             json.dumps({"key": SecretValue("hunter2")})
+
+
+class TestPaperRefusesOnALiveMachine:
+    """Guard 0: paper and live are separate planes (§21).
+
+    `assert_not_live` was written for exactly this, documented as "used by
+    research and paper components", and called by nothing — so the claim was
+    not true of anything. A paper cycle on a machine armed for live is the
+    mixed-mode case the separation exists to prevent: paper fills and real ones
+    end up indistinguishable in the same state directory.
+    """
+
+    def test_the_paper_cycle_refuses_when_live_is_armed(self, monkeypatch, capsys, tmp_path):
+        from apps.cli import paper
+
+        _pin_settings(monkeypatch, Settings(env=Environment.LIVE, live_enabled=True))
+        assert paper.run(["--state-dir", str(tmp_path)]) == 1
+        printed = capsys.readouterr().out
+        assert "must not run with live trading enabled" in printed
+        # And it says what to change, rather than leaving the operator to guess.
+        assert "NEUTRON_ENV" in printed
+
+    def test_one_key_alone_does_not_block_paper(self, monkeypatch, tmp_path):
+        """Only both keys together mean "armed for live". Blocking on either
+        alone would make paper trading unusable on any machine that has ever
+        been configured for live, which is how a guard gets disabled."""
+        _pin_settings(monkeypatch, Settings(env=Environment.LIVE, live_enabled=False))
+        from core.secrets import assert_not_live
+
+        assert_not_live("the paper trading cycle")
+
+        _pin_settings(monkeypatch, Settings(env=Environment.DEV, live_enabled=True))
+        assert_not_live("the paper trading cycle")

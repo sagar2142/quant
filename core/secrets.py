@@ -169,15 +169,28 @@ def load_broker_credentials(broker: str = "kite") -> BrokerCredentials:
     """
     settings.require_live_permission()
 
-    if broker != "kite":
-        raise ValueError(f"unknown broker: {broker}")
+    if broker == "kite":
+        return BrokerCredentials(
+            broker=broker,
+            api_key=_require("KITE_API_KEY", "live order placement"),
+            api_secret=_require("KITE_API_SECRET", "live order placement"),
+            access_token=_require("KITE_ACCESS_TOKEN", "live order placement"),
+        )
 
-    return BrokerCredentials(
-        broker=broker,
-        api_key=_require("KITE_API_KEY", "live order placement"),
-        api_secret=_require("KITE_API_SECRET", "live order placement"),
-        access_token=_require("KITE_ACCESS_TOKEN", "live order placement"),
-    )
+    if broker == "groww":
+        # Groww issues an API key and a secret; the access token is minted from
+        # them and expires at 06:00 IST daily. So the secret is what must be
+        # held, and the token is optional — supplied only by someone who has
+        # minted one out of band. Requiring the token was requiring a value
+        # Groww does not hand out, which is why nobody could produce it.
+        return BrokerCredentials(
+            broker=broker,
+            api_key=_require("GROWW_API_KEY", "live order placement"),
+            api_secret=SecretValue(os.environ.get("GROWW_API_SECRET", "").strip()),
+            access_token=SecretValue(os.environ.get("GROWW_ACCESS_TOKEN", "").strip()),
+        )
+
+    raise ValueError(f"unknown broker: {broker}; expected 'kite' or 'groww'")
 
 
 def assert_not_live(context: str) -> None:

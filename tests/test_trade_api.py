@@ -53,7 +53,7 @@ class TestGates:
     def test_the_kill_switch_is_a_gate(self):
         engine = RiskEngine()
         engine.engage_kill("testing", "suite")
-        kill = next(g for g in live_gates(engine) if g.name == "kill_switch")
+        kill = next(g for g in live_gates(engine) if g.name == "Kill switch")
         assert not kill.ready
 
     def test_status_reports_blocked_rather_than_pretending(self, client):

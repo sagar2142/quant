@@ -33,15 +33,19 @@ from typing import TYPE_CHECKING, Protocol
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from apps.api.accounts import SessionCookie
 from apps.api.analytics import latest_quote
 from apps.api.auth import ReadAccess, WriteAccess
-from core.clock import utc_now
+from core.clock import as_decision_time, utc_now
 from core.config import settings
-from core.instruments import InstrumentId
+from core.instruments import InstrumentId, OptionType
+from data.store.bars import NoDataError
+from data.store.derivatives import DerivativesStore
 from trading.risk.engine import RiskEngine
 from trading.risk.limits import PortfolioState, ProposedOrder
 
 if TYPE_CHECKING:  # pragma: no cover - types only; the runtime import is local
+    from core.secrets import BrokerCredentials
     from trading.execution.broker import BrokerFill, BrokerOrder, BrokerPosition
 
 __all__ = ["MANUAL_STRATEGY", "build_trade_router", "live_gates"]
@@ -64,6 +68,9 @@ MANUAL_STRATEGY = "manual"
 BUY_COST_RATE = Decimal("0.0012")
 SELL_COST_RATE = Decimal("0.0022")
 
+#: The chain speaks CE and PE; the instrument model speaks CALL and PUT.
+OPTION_RIGHTS = {"CE": OptionType.CALL, "PE": OptionType.PUT}
+
 
 class OrderRequest(BaseModel):
     """One order, as the ticket sends it."""
@@ -84,6 +91,17 @@ class OrderRequest(BaseModel):
     #: number would make each check pass or fail for a reason unconnected to
     #: the account being traded.
     equity: str
+    #: Which market this order is in. An equity order is priced on notional and
+    #: an option order on premium, and they are not the same number: 10 lots of
+    #: a 20-rupee option on a 500-share lot is 100,000 of premium against
+    #: 6,435,000 of underlying exposure. Charging one as though it were the
+    #: other is not a rounding error.
+    kind: str = Field(default="EQUITY", pattern="^(EQUITY|OPTION)$")
+    #: Option contract, required when `kind` is OPTION. The strike is a string
+    #: for the same reason every other price here is (§14.1.2).
+    expiry: str | None = None
+    strike: str | None = None
+    right: str | None = Field(default=None, pattern="^(CE|PE)$")
 
 
 class GateStatus(BaseModel):
@@ -104,6 +122,16 @@ class PreviewResponse(BaseModel):
     symbol: str
     instrument_id: str
     last_close: str
+    kind: str
+    #: Contracts, for an option. One lot is `lot_size` units, and NSE trades
+    #: options in whole lots only.
+    lot_size: str | None = None
+    #: What the underlying exposure actually is, which for an option is the
+    #: premium times nothing like the notional. Stated because an option that
+    #: costs 100,000 in premium can carry 6,435,000 of delta-one exposure, and
+    #: a ticket showing only the premium invites sizing against the wrong
+    #: number.
+    underlying_exposure: str | None = None
     side: str
     quantity: str
     notional: str
@@ -165,52 +193,100 @@ def _decimal(raw: str, field: str) -> Decimal:
     return value
 
 
-def _credential_gate() -> GateStatus:
-    """Whether Kite credentials load and the token is actually set.
+def account_credentials(session: str | None, broker: str) -> BrokerCredentials | None:
+    """The signed-in account's stored broker keys, or None.
 
-    Probed by loading them, because a key that is present but empty is not a
-    key — a distinction that matters at 08:59 when the daily Kite login has not
-    been done and every field still looks configured.
+    **This is what makes "connect your broker" mean anything.** The console
+    encrypts a key and secret into the account document; without a read path
+    they were write-only, and the credential gate below reported "not
+    connected" to an operator who had just connected. Everything still ran off
+    environment variables, which is a different place from the one the screen
+    writes to.
+
+    The environment wins where it is set: a machine deliberately pinned to one
+    set of credentials should not be overridden by whoever happens to be signed
+    in, and `_environment_pins` is the existing expression of that rule.
     """
+    from apps.api.accounts import current_account  # noqa: PLC0415 - optional path
+    from apps.api.broker_keys import stored_credentials  # noqa: PLC0415
+    from core.secrets import BrokerCredentials, SecretValue  # noqa: PLC0415
+
+    account = current_account(session)
+    if account is None:
+        return None
     try:
-        from core.secrets import load_broker_credentials  # noqa: PLC0415 - optional path
-
-        credentials = load_broker_credentials("kite")
-    except Exception as exc:  # noqa: BLE001 - any failure here means "not ready"
-        return GateStatus(
-            name="broker_credentials", ready=False, detail=f"{type(exc).__name__}: {exc}"
-        )
-
-    ready = credentials.access_token.is_set
-    return GateStatus(
-        name="broker_credentials",
-        ready=ready,
-        detail=(
-            "Kite key and access token loaded"
-            if ready
-            else "KITE_ACCESS_TOKEN is empty — complete the daily Kite login"
-        ),
+        stored = stored_credentials(account.settings, broker)
+    except Exception:  # noqa: BLE001 - an unreadable key is not a usable one
+        return None
+    if stored is None:
+        return None
+    return BrokerCredentials(
+        broker=broker,
+        api_key=SecretValue(stored["api_key"]),
+        api_secret=SecretValue(stored["api_secret"]),
+        access_token=SecretValue(stored["access_token"]),
     )
 
 
-def live_gates(risk: RiskEngine) -> list[GateStatus]:
+def _credential_gate(session: str | None = None) -> GateStatus:
+    """Whether broker credentials load and a usable secret is actually set.
+
+    Probed by loading them, because a key that is present but empty is not a
+    key — a distinction that matters at 08:59 when the daily login has not been
+    done and every field still looks configured.
+
+    Checks the signed-in account's stored keys first, then the environment.
+    """
+    broker = settings.broker.capitalize()
+    from_account = account_credentials(session, settings.broker.lower())
+    if from_account is not None:
+        ready = from_account.access_token.is_set or from_account.api_secret.is_set
+        return GateStatus(
+            name="Broker credentials",
+            ready=ready,
+            detail=f"{broker} connected" if ready else f"{broker} API key and secret required",
+        )
+
+    try:
+        from core.secrets import load_broker_credentials  # noqa: PLC0415 - optional path
+
+        credentials = load_broker_credentials(settings.broker.lower())
+    except Exception:  # noqa: BLE001 - any failure here means "not ready"
+        # Deliberately not the exception text. A `PermissionError` repr on an
+        # operations screen is a stack trace wearing a status label: it names
+        # the internal guard that fired rather than the thing to do about it,
+        # and every gate above already reports that thing.
+        return GateStatus(
+            name="Broker credentials", ready=False, detail=f"{broker} account not connected"
+        )
+
+    # Either a minted token, or the key and secret to mint one with.
+    ready = credentials.access_token.is_set or credentials.api_secret.is_set
+    return GateStatus(
+        name="Broker credentials",
+        ready=ready,
+        detail=f"{broker} connected" if ready else f"{broker} API key and secret required",
+    )
+
+
+def live_gates(risk: RiskEngine, session: str | None = None) -> list[GateStatus]:
     """Every precondition between a click and the exchange, in failure order."""
     return [
         GateStatus(
-            name="environment",
+            name="Environment",
             ready=settings.env.is_live,
-            detail=f"env={settings.env.value}; live paths require the live environment",
+            detail="Live" if settings.env.is_live else f"{settings.env.value.capitalize()} mode",
         ),
         GateStatus(
-            name="live_enabled",
+            name="Live trading",
             ready=bool(settings.live_enabled),
-            detail="NEUTRON_LIVE_ENABLED must be set; the environment alone is not enough (§21)",
+            detail="Enabled" if settings.live_enabled else "Disabled",
         ),
-        _credential_gate(),
+        _credential_gate(session),
         GateStatus(
-            name="kill_switch",
+            name="Kill switch",
             ready=not risk.is_killed,
-            detail="engaged — release it before trading" if risk.is_killed else "clear",
+            detail="Engaged — release before trading" if risk.is_killed else "Clear",
         ),
     ]
 
@@ -221,9 +297,185 @@ def estimated_costs(notional: Decimal, side: str) -> Decimal:
     return (notional * rate).quantize(Decimal("0.01"))
 
 
-def _require_armed(risk: RiskEngine) -> None:
+def option_quote(request: OrderRequest) -> dict[str, object]:
+    """The contract this ticket names, priced from the last session.
+
+    Raises:
+        HTTPException: 422 when the contract terms are incomplete, 404 when no
+            such contract is listed. Both say which, because "no such option"
+            and "you did not say which strike" need different corrections.
+    """
+    from datetime import date as _date  # noqa: PLC0415 - local to the option path
+
+    if not (request.expiry and request.strike and request.right):
+        raise HTTPException(
+            status_code=422,
+            detail="an option order needs expiry, strike and right (CE or PE)",
+        )
+    try:
+        expiry = _date.fromisoformat(request.expiry)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"expiry is not a date: {request.expiry!r}"
+        ) from exc
+
+    strike = _decimal(request.strike, "strike")
+    store = DerivativesStore(settings.lake)
+    try:
+        chain = store.chain(request.symbol, as_of=as_decision_time(utc_now()))
+    except NoDataError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    match = chain.filter(
+        (chain["expiry"] == expiry)
+        & (chain["strike"] == float(strike))
+        & (chain["right"] == request.right)
+    )
+    if match.is_empty():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no {request.symbol.upper()} {expiry} {strike} {request.right} contract is listed"
+            ),
+        )
+    row = match.to_dicts()[0]
+    return {
+        "contract_id": str(row["contract_id"]),
+        "premium": float(row["close"] or 0.0),
+        "underlying_price": float(row["underlying_price"] or 0.0),
+        "lot_size": float(row["lot_size"] or 0.0),
+        "expiry": expiry,
+        "strike": strike,
+        "right": str(row["right"]),
+    }
+
+
+def _option_preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
+    """Risk verdict and cost for one option order.
+
+    **Sized in lots, and priced on premium.** NSE options trade in whole lots,
+    so a quantity that is not a multiple of the lot is not an order the
+    exchange will take — refused here rather than rounded, because rounding a
+    size is deciding a position on the operator's behalf.
+
+    The risk engine is handed the *premium* outlay, which is what a bought
+    option can lose. That is deliberately not the underlying exposure, and both
+    are returned so the difference is on the screen rather than in the reader's
+    head.
+    """
+    quote = option_quote(request)
+    lot = Decimal(str(quote["lot_size"]))
+    premium = Decimal(str(quote["premium"]))
+    quantity = _decimal(request.quantity, "quantity")
+    equity = _decimal(request.equity, "equity")
+
+    if quantity <= 0:
+        raise HTTPException(status_code=422, detail="quantity must be positive")
+    if equity <= 0:
+        raise HTTPException(status_code=422, detail="equity must be positive")
+    if lot <= 0:
+        raise HTTPException(status_code=422, detail="the contract has no lot size")
+    if quantity % lot != 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"NSE options trade in whole lots: {quantity} is not a multiple of {lot}. "
+                f"Nearest lots: {int(quantity // lot)} ({int(quantity // lot) * lot} units) "
+                f"or {int(quantity // lot) + 1} ({(int(quantity // lot) + 1) * lot} units)."
+            ),
+        )
+    if premium <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="the contract has no closing premium — it did not trade in the last session",
+        )
+
+    instrument_id = InstrumentId(str(quote["contract_id"]))
+    outlay = premium * quantity
+    exposure = Decimal(str(quote["underlying_price"])) * quantity
+
+    state = PortfolioState(
+        equity=equity,
+        cash=equity,
+        peak_equity=equity,
+        day_start_equity=equity,
+        last_prices={instrument_id: premium},
+    )
+    proposed = ProposedOrder(
+        strategy_id=MANUAL_STRATEGY,
+        instrument_id=instrument_id,
+        quantity=quantity,
+        price=premium,
+        multiplier=Decimal(1) if request.side == "BUY" else Decimal(-1),
+    )
+    verdict = risk.check(proposed, state)
+    costs = option_costs(instrument_id, request, quantity, premium, lot)
+    impact = outlay + costs if request.side == "BUY" else costs - outlay
+
+    return PreviewResponse(
+        symbol=request.symbol.upper(),
+        instrument_id=str(instrument_id),
+        last_close=f"{premium:.2f}",
+        kind="OPTION",
+        lot_size=f"{lot:.0f}",
+        underlying_exposure=f"{exposure:.2f}",
+        side=request.side,
+        quantity=str(quantity),
+        notional=f"{outlay:.2f}",
+        estimated_costs=f"{costs:.2f}",
+        cash_impact=f"{impact:.2f}",
+        allowed=verdict.allowed,
+        breaches=list(verdict.reasons),
+        checks=[{"name": c.name, "passed": c.passed, "detail": c.message} for c in verdict.checks],
+    )
+
+
+def option_costs(
+    instrument_id: InstrumentId,
+    request: OrderRequest,
+    quantity: Decimal,
+    premium: Decimal,
+    lot: Decimal,
+) -> Decimal:
+    """Charges on one option leg, from the real cost model.
+
+    `NseOptionsCostModel` has existed since the cost work and nothing reached
+    it: STT on premium for the sell leg, exchange and SEBI fees, stamp on the
+    buy, GST on the fee components but not on STT. Using the flat estimate the
+    equity ticket uses would have been wrong in both directions at once, since
+    options are charged on premium rather than on notional.
+    """
+    from core.instruments import AssetClass, Currency, Exchange, Instrument  # noqa: PLC0415
+    from core.orders import Side  # noqa: PLC0415
+    from engine.costs.india import NseOptionsCostModel  # noqa: PLC0415
+    from engine.costs.model import TradeContext  # noqa: PLC0415
+
+    contract = Instrument(
+        instrument_id=instrument_id,
+        symbol=request.symbol.upper(),
+        asset_class=AssetClass.OPTION,
+        exchange=Exchange.NSE,
+        currency=Currency.INR,
+        tick_size=Decimal("0.05"),
+        lot_size=int(lot),
+        expiry=datetime.fromisoformat(f"{request.expiry}T00:00:00+00:00"),
+        strike=_decimal(request.strike or "0", "strike"),
+        option_type=OPTION_RIGHTS[request.right or "CE"],
+    )
+    breakdown = NseOptionsCostModel().cost(
+        TradeContext(
+            instrument=contract,
+            side=Side.BUY if request.side == "BUY" else Side.SELL,
+            quantity=quantity,
+            price=premium,
+        )
+    )
+    return Decimal(breakdown.total)
+
+
+def _require_armed(risk: RiskEngine, session: str | None = None) -> None:
     """Refuse unless every gate is open, naming the ones that are not."""
-    blocked = [g for g in live_gates(risk) if not g.ready]
+    blocked = [g for g in live_gates(risk, session) if not g.ready]
     if blocked:
         raise HTTPException(
             status_code=409,
@@ -237,6 +489,9 @@ def _require_armed(risk: RiskEngine) -> None:
 
 def _preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
     """Risk verdict and cost for an order, sending nothing."""
+    if request.kind == "OPTION":
+        return _option_preview(request, risk)
+
     quantity = _decimal(request.quantity, "quantity")
     reference = _decimal(request.reference_price, "reference_price")
     equity = _decimal(request.equity, "equity")
@@ -287,6 +542,7 @@ def _preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
         symbol=request.symbol.upper(),
         instrument_id=str(instrument_id),
         last_close=f"{last_close:.2f}",
+        kind="EQUITY",
         side=request.side,
         quantity=str(quantity),
         notional=f"{notional:.2f}",
@@ -298,17 +554,15 @@ def _preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
     )
 
 
-def _submit(request: OrderRequest, risk: RiskEngine) -> SubmitResponse:
+def _submit(request: OrderRequest, risk: RiskEngine, session: str | None = None) -> SubmitResponse:
     """Place a live order. Reached only with every gate open."""
-    _require_armed(risk)
+    _require_armed(risk, session)
 
     # Imported here, not at module scope: `KiteBroker.__post_init__` calls
     # `require_live_permission`, which raises in every non-live environment.
     # A module-scope import would make this file unimportable in development.
     from core.orders import OrderType, Side  # noqa: PLC0415
-    from core.secrets import load_broker_credentials  # noqa: PLC0415
     from trading.execution.broker import BrokerError  # noqa: PLC0415
-    from trading.execution.kite import KiteBroker  # noqa: PLC0415
     from trading.execution.orders import Order, TradingMode  # noqa: PLC0415
 
     quantity = _decimal(request.quantity, "quantity")
@@ -329,9 +583,9 @@ def _submit(request: OrderRequest, risk: RiskEngine) -> SubmitResponse:
         decision_time=utc_now(),
         limit_price=_decimal(request.limit_price, "limit_price") if request.limit_price else None,
     )
-    broker = KiteBroker(credentials=load_broker_credentials("kite"), instruments={})
+    broker = _broker(session)
     try:
-        broker_order_id = broker.submit(order, reference)
+        broker_order_id = broker.submit(order, reference)  # type: ignore[attr-defined]
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=f"broker rejected the order: {exc}") from exc
 
@@ -362,7 +616,7 @@ class LiveBroker(Protocol):
     def fills_since(self, marker: str | None) -> list[BrokerFill]: ...
 
 
-def _broker() -> LiveBroker:
+def _broker(session: str | None = None) -> LiveBroker:
     """A live broker, or an HTTP error explaining why there is not one.
 
     Constructed per request rather than held: `KiteBroker` carries a session
@@ -371,12 +625,23 @@ def _broker() -> LiveBroker:
     unrelated sessions.
     """
     from core.secrets import load_broker_credentials  # noqa: PLC0415
+
+    name = settings.broker.lower()
+    # The account's own keys first, then the environment — the same order the
+    # gate reports, so what the screen says is connected is what actually
+    # places the order.
+    credentials = account_credentials(session, name) or load_broker_credentials(name)
+    if name == "groww":
+        from trading.execution.groww import GrowwBroker  # noqa: PLC0415
+
+        return GrowwBroker(credentials=credentials, instruments={})
+
     from trading.execution.kite import KiteBroker  # noqa: PLC0415
 
-    return KiteBroker(credentials=load_broker_credentials("kite"), instruments={})
+    return KiteBroker(credentials=credentials, instruments={})
 
 
-def _working_orders(risk: RiskEngine) -> list[WorkingOrder]:
+def _working_orders(risk: RiskEngine, session: str | None = None) -> list[WorkingOrder]:
     """Today's order book, read from the venue.
 
     Empty is a valid answer only when the broker actually said so. Without
@@ -388,7 +653,7 @@ def _working_orders(risk: RiskEngine) -> list[WorkingOrder]:
     from trading.execution.broker import BrokerError  # noqa: PLC0415
 
     try:
-        found = _broker().orders()
+        found = _broker(session).orders()
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [
@@ -407,13 +672,13 @@ def _working_orders(risk: RiskEngine) -> list[WorkingOrder]:
     ]
 
 
-def _held_positions(risk: RiskEngine) -> list[HeldPosition]:
+def _held_positions(risk: RiskEngine, session: str | None = None) -> list[HeldPosition]:
     """What the broker believes is held — the reconciliation baseline (§9)."""
     _require_armed(risk)
     from trading.execution.broker import BrokerError  # noqa: PLC0415
 
     try:
-        held = _broker().positions()
+        held = _broker(session).positions()
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [
@@ -426,13 +691,13 @@ def _held_positions(risk: RiskEngine) -> list[HeldPosition]:
     ]
 
 
-def _executed_fills(risk: RiskEngine) -> list[ExecutedFill]:
+def _executed_fills(risk: RiskEngine, session: str | None = None) -> list[ExecutedFill]:
     """Today's executions, as the venue reports them."""
     _require_armed(risk)
     from trading.execution.broker import BrokerError  # noqa: PLC0415
 
     try:
-        executed = _broker().fills_since(None)
+        executed = _broker(session).fills_since(None)
     except BrokerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [
@@ -459,9 +724,9 @@ def build_trade_router(risk: RiskEngine) -> APIRouter:
     router = APIRouter(prefix="/trade", tags=["trade"])
 
     @router.get("/status", response_model=TradeStatusResponse, dependencies=[ReadAccess])
-    def status() -> TradeStatusResponse:
+    def status(session: SessionCookie = None) -> TradeStatusResponse:
         """Whether an order could be placed right now, and what is missing."""
-        gates = live_gates(risk)
+        gates = live_gates(risk, session)
         armed = all(g.ready for g in gates)
         return TradeStatusResponse(
             can_trade=armed, mode="LIVE" if armed else "BLOCKED", gates=gates
@@ -473,37 +738,35 @@ def build_trade_router(risk: RiskEngine) -> APIRouter:
         return _preview(request, risk)
 
     @router.post("/orders", response_model=SubmitResponse, dependencies=[WriteAccess])
-    def submit(request: OrderRequest) -> SubmitResponse:
+    def submit(request: OrderRequest, session: SessionCookie = None) -> SubmitResponse:
         """Place a live order. Every gate must be open."""
-        return _submit(request, risk)
+        return _submit(request, risk, session)
 
     @router.get("/orders", response_model=list[WorkingOrder], dependencies=[ReadAccess])
-    def orders() -> list[WorkingOrder]:
+    def orders(session: SessionCookie = None) -> list[WorkingOrder]:
         """Today's order book, read from the venue."""
-        return _working_orders(risk)
+        return _working_orders(risk, session)
 
     @router.get("/positions", response_model=list[HeldPosition], dependencies=[ReadAccess])
-    def positions() -> list[HeldPosition]:
+    def positions(session: SessionCookie = None) -> list[HeldPosition]:
         """What the broker believes is held — the reconciliation baseline (§9)."""
-        return _held_positions(risk)
+        return _held_positions(risk, session)
 
     @router.get("/fills", response_model=list[ExecutedFill], dependencies=[ReadAccess])
-    def fills() -> list[ExecutedFill]:
+    def fills(session: SessionCookie = None) -> list[ExecutedFill]:
         """Today's executions, as the venue reports them."""
-        return _executed_fills(risk)
+        return _executed_fills(risk, session)
 
     @router.delete("/orders/{broker_order_id}", dependencies=[WriteAccess])
-    def cancel(broker_order_id: str) -> dict[str, str]:
+    def cancel(broker_order_id: str, session: SessionCookie = None) -> dict[str, str]:
         """Cancel a working order at the venue."""
-        _require_armed(risk)
+        _require_armed(risk, session)
 
-        from core.secrets import load_broker_credentials  # noqa: PLC0415
         from trading.execution.broker import BrokerError  # noqa: PLC0415
-        from trading.execution.kite import KiteBroker  # noqa: PLC0415
 
-        broker = KiteBroker(credentials=load_broker_credentials("kite"), instruments={})
+        broker = _broker(session)
         try:
-            broker.cancel(broker_order_id)
+            broker.cancel(broker_order_id)  # type: ignore[attr-defined]
         except BrokerError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"cancelled": broker_order_id}

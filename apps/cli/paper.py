@@ -33,6 +33,7 @@ from apps.cli.backtest import build_universe, load_panel, nse_instrument
 from core.clock import UTC, as_decision_time, utc_now
 from core.config import settings
 from core.instruments import Instrument, InstrumentId
+from core.secrets import assert_not_live
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.accounting import Portfolio
@@ -335,6 +336,21 @@ def announce(alerts: AlertRouter, state: PaperState, report: CycleReport) -> Non
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # Guard 0, behind the import boundaries and the broker's own mode checks
+    # (§21). `assert_not_live` was written for exactly this and had no caller,
+    # so the claim in its docstring that "research and paper components use
+    # it" was not true of anything. A paper cycle on a machine armed for live
+    # is the mixed-mode case the separation exists to prevent: paper fills and
+    # real ones become indistinguishable in the same state directory.
+    try:
+        assert_not_live("the paper trading cycle")
+    except PermissionError as exc:
+        print(f"{exc}\n")
+        print("Paper trading and live trading are separate planes (MASTER_PLAN 21).")
+        print("Set NEUTRON_ENV=paper (or dev), or unset NEUTRON_LIVE_ENABLED, and retry.")
+        return 1
+
     store = PaperStateStore(args.state_dir)
     alerts = build_router()
     print(describe_channels())
