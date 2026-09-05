@@ -19,12 +19,14 @@ import { Lab } from "./Lab";
 import { Research } from "./Research";
 import { RiskModel } from "./RiskModel";
 import { Screener } from "./Screener";
+import { Sectors } from "./Sectors";
 import type { ContractTerms } from "./Ticket";
 
 export type ResearchTab =
   | "security"
   | "screener"
   | "crosssection"
+  | "sectors"
   | "factors"
   | "riskmodel"
   | "lab";
@@ -33,6 +35,7 @@ export const RESEARCH_TABS: { id: ResearchTab; label: string; hint: string }[] =
   { id: "security", label: "Security", hint: "One name, fully decomposed" },
   { id: "screener", label: "Screener", hint: "Which names, rather than what is this name" },
   { id: "crosssection", label: "Cross-section", hint: "Correlation, clusters and weights" },
+  { id: "sectors", label: "Sectors", hint: "What the universe is actually made of" },
   { id: "factors", label: "Factors", hint: "Signal scores across the universe" },
   { id: "riskmodel", label: "Risk model", hint: "What the book is actually exposed to" },
   { id: "lab", label: "Lab", hint: "Run a backtest, or put one through the gauntlet" },
@@ -91,6 +94,7 @@ export function ResearchDesk({
           onTab("security");
         }} />}
         {tab === "crosssection" && <Analytics key={symbol || "none"} initialSymbols={symbol} />}
+        {tab === "sectors" && <Sectors />}
         {tab === "factors" && <Factors />}
         {tab === "riskmodel" && <RiskModel />}
         {tab === "lab" && <Lab />}

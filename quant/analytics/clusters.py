@@ -30,6 +30,7 @@ from quant.math.optim.allocation import cluster_assets
 __all__ = [
     "CLUSTER_THRESHOLD",
     "CLUSTER_WINDOW",
+    "CORRELATION_PREFIX",
     "MIN_CLUSTER_BARS",
     "MIN_OBS_PER_NAME",
     "assign_clusters",
@@ -58,6 +59,16 @@ CLUSTER_THRESHOLD = 0.5
 MIN_CLUSTER_BARS = 20
 
 
+#: Namespace for a correlation-derived group.
+#:
+#: The risk engine's cluster limit is fed from two different groupings — this
+#: one, and the industry labels in `data.store.sectors` — and they answer
+#: different questions. Bare labels made them indistinguishable in a breach
+#: message and one collision away from being silently mixed. The prefix says
+#: which grouping decided, in the place a reader is already looking.
+CORRELATION_PREFIX = "corr:"
+
+
 def assign_clusters(
     panel: pl.DataFrame,
     instruments: tuple[InstrumentId, ...],
@@ -74,7 +85,7 @@ def assign_clusters(
             history are returned unclustered.
 
     Returns:
-        `{instrument_id: "c0"}`. A name absent from the mapping has no cluster,
+        `{instrument_id: "corr:0"}`. A name absent from the mapping has no cluster,
         which the risk engine treats as an unchecked concentration rather than
         a cleared one — the same distinction the liquidity check now makes.
     """
@@ -131,5 +142,5 @@ def assign_clusters(
     labels: dict[InstrumentId, str] = {}
     for index, members in enumerate(groups):
         for member in members:
-            labels[InstrumentId(names[member])] = f"c{index}"
+            labels[InstrumentId(names[member])] = f"{CORRELATION_PREFIX}{index}"
     return labels

@@ -347,7 +347,10 @@ class RiskEngine:
             passed=resulting <= self.limits.max_cluster_pct,
             observed=resulting,
             threshold=self.limits.max_cluster_pct,
-            message=f"correlated group '{order.cluster}' as a fraction of NAV",
+            # The label carries its own namespace — "corr:" or "industry:" — so
+            # a breach says which grouping decided rather than leaving the
+            # reader to guess which of the two produced it.
+            message=f"group '{order.cluster or 'none'}' as a fraction of NAV",
         )
 
     # ── layer 3 ─────────────────────────────────────────────────────────────

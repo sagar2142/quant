@@ -46,9 +46,28 @@ from trading.risk.limits import PortfolioState, ProposedOrder
 
 if TYPE_CHECKING:  # pragma: no cover - types only; the runtime import is local
     from core.secrets import BrokerCredentials
+    from data.store.sectors import SectorView
     from trading.execution.broker import BrokerFill, BrokerOrder, BrokerPosition
 
-__all__ = ["MANUAL_STRATEGY", "build_trade_router", "live_gates"]
+__all__ = [
+    "INDUSTRY_PREFIX",
+    "MANUAL_STRATEGY",
+    "UNCLASSIFIED",
+    "build_trade_router",
+    "live_gates",
+    "sector_exposure",
+]
+
+#: Group for a name NSE does not classify. Named rather than blank, because an
+#: empty cluster is what made the concentration limit unfailable — every
+#: unclassified order landed in the same nameless bucket as every other and the
+#: check compared against nothing.
+UNCLASSIFIED = "industry:unclassified"
+
+#: Namespace for an industry-derived group, mirroring `CORRELATION_PREFIX`. The
+#: two groupings answer different questions and must not be mistaken for each
+#: other in a breach message.
+INDUSTRY_PREFIX = "industry:"
 
 #: Strategy id recorded against a hand-entered order.
 #:
@@ -269,6 +288,42 @@ def _credential_gate(session: str | None = None) -> GateStatus:
     )
 
 
+def sector_exposure(
+    positions: dict[InstrumentId, Decimal],
+) -> tuple[dict[str, Decimal], SectorView]:
+    """Signed notional per industry, and the classification used.
+
+    **This is what makes the concentration limit mean anything on a manual
+    order.** `ProposedOrder.cluster` defaulted to the empty string, so
+    `_cluster_check` compared the order against a group that was always empty
+    and passed every time — a limit that cannot fail is not a limit. Correlation
+    clustering is the better answer where there is history to cluster over
+    (`quant.analytics.clusters` argues why, and it is right), but a hand-entered
+    order arrives without one and an industry is a real group rather than no
+    group at all.
+
+    Present-tense, so the classification carries no look-ahead: the book is
+    valued as it stands and the labels were observed at or before now.
+    """
+    from data.store.sectors import SectorStore  # noqa: PLC0415 - optional at import
+
+    view = SectorStore(settings.lake).view()
+    groups: dict[str, Decimal] = {}
+    for instrument_id, notional in positions.items():
+        found = view.industry_of(str(instrument_id))
+        industry = f"{INDUSTRY_PREFIX}{found}" if found else UNCLASSIFIED
+        groups[industry] = groups.get(industry, Decimal(0)) + notional
+    return groups, view
+
+
+def _cluster_for(instrument_id: InstrumentId) -> str:
+    """The group a hand-entered order belongs to."""
+    from data.store.sectors import SectorStore  # noqa: PLC0415
+
+    found = SectorStore(settings.lake).view().industry_of(str(instrument_id))
+    return f"{INDUSTRY_PREFIX}{found}" if found else UNCLASSIFIED
+
+
 def live_gates(risk: RiskEngine, session: str | None = None) -> list[GateStatus]:
     """Every precondition between a click and the exchange, in failure order."""
     return [
@@ -407,6 +462,7 @@ def _option_preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
         quantity=quantity,
         price=premium,
         multiplier=Decimal(1) if request.side == "BUY" else Decimal(-1),
+        cluster=_cluster_for(instrument_id),
     )
     verdict = risk.check(proposed, state)
     costs = option_costs(instrument_id, request, quantity, premium, lot)
@@ -532,6 +588,7 @@ def _preview(request: OrderRequest, risk: RiskEngine) -> PreviewResponse:
         quantity=quantity,
         price=reference,
         multiplier=Decimal(1) if request.side == "BUY" else Decimal(-1),
+        cluster=_cluster_for(instrument_id),
     )
     verdict = risk.check(proposed, state)
     notional = proposed.notional

@@ -151,6 +151,22 @@ def _report(outcomes: list[Outcome]) -> None:
             print(f"    {plan.feed.name:<9}{plan.deferred:>6} day(s)   {command}")
 
 
+def _classification_is_stale(lake: Path, max_age_days: int) -> bool:
+    """Whether the industry classification is old enough to refetch.
+
+    Stale rather than missing, because an absent classification is also stale —
+    both mean the next read would be reaching further back than intended.
+    """
+    if max_age_days <= 0:
+        return False
+    from data.store.sectors import SectorStore  # noqa: PLC0415
+
+    held = SectorStore(lake).observations()
+    if not held:
+        return True
+    return (utc_now().date() - held[-1]).days >= max_age_days
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch every feed's missing sessions")
     parser.add_argument(
@@ -177,6 +193,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--check",
         action="store_true",
         help="Run the data-quality suite afterwards",
+    )
+    parser.add_argument(
+        "--classify-after-days",
+        type=int,
+        default=7,
+        help=(
+            "Refetch the industry classification when it is this old. 0 never "
+            "fetches it. NSE changes index membership at reviews, so a daily "
+            "fetch would learn nothing."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -206,6 +232,15 @@ def run(argv: list[str] | None = None) -> int:
         outcomes.append(run_plan(plan, lake, args.pause))
 
     _report(outcomes)
+
+    # Industry classification, on a cadence rather than every run: NSE changes
+    # index membership at reviews and an industry label almost never moves, so
+    # a daily fetch would be a request a day to learn nothing.
+    if _classification_is_stale(lake, args.classify_after_days):
+        print(f"\n[sectors] classification older than {args.classify_after_days} days")
+        from apps.cli import ingest_sectors  # noqa: PLC0415 - only on the cadence
+
+        ingest_sectors.run(["--lake", str(lake)] if args.lake else [])
 
     if args.check:
         # After, not before: the check should judge the lake this run produced.

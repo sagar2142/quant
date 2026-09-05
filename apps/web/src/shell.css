@@ -1056,3 +1056,29 @@ tbody tr:hover {
  * concentrated in two orders and one spread across two hundred call for
  * different fixes, and the eye should be able to tell which without arithmetic. */
 .journal-worst td { background: color-mix(in srgb, var(--critical) 7%, transparent); }
+
+/* ── sector composition ──────────────────────────────────────────────────────
+ *
+ * A bar per industry, scaled to the universe rather than to the largest row:
+ * scaling to the largest would make every breakdown look equally concentrated,
+ * which is the one thing this view exists to distinguish.
+ */
+
+.sectors { padding-top: var(--space-2); }
+
+.sector-bar-cell { width: 34%; padding-left: var(--space-3); }
+
+.sector-bar {
+  display: block;
+  height: 8px;
+  background: var(--accent);
+  opacity: 0.55;
+  border-radius: 2px;
+  min-width: 2px;
+}
+
+/* Past the point where "diversified" stops being the right word. */
+.sector-bar.wide {
+  background: var(--warn);
+  opacity: 0.75;
+}

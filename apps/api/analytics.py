@@ -21,6 +21,7 @@ from functools import lru_cache
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from apps.api.auth import ReadAccess
 from apps.api.schemas import (
@@ -38,11 +39,18 @@ from data.feeds.nse_indices import BENCHMARK
 from data.store.bars import NoDataError
 from data.store.indices import IndexStore
 from data.store.panel import PanelStore
+from data.universe.pit import UniverseBuilder, UniverseSpec
 from quant.analytics.crosssection import analyse_cross_section
 from quant.analytics.screener import ScreenCriteria, SortKey, screen_universe
 from quant.analytics.security import profile_security
 
-__all__ = ["benchmark", "benchmark_names", "build_analytics_router", "latest_quote"]
+__all__ = [
+    "benchmark",
+    "benchmark_names",
+    "build_analytics_router",
+    "latest_quote",
+    "sector_breakdown",
+]
 
 #: Cap on symbols per cross-section request. The correlation work is O(n^2) and
 #: a browser cannot read a 200-name matrix anyway.
@@ -151,6 +159,75 @@ def benchmark(name: str = BENCHMARK) -> pl.DataFrame:
     carries `market_source`.
     """
     return _read_benchmark(_index_fingerprint(), name)
+
+
+class SectorRow(BaseModel):
+    industry: str
+    names: int
+    #: Share of the universe in this industry, by name count.
+    share: float
+
+
+class SectorResponse(BaseModel):
+    """What the tradable universe is actually made of."""
+
+    observed_at: str | None
+    #: Share of the requested universe NSE classifies. A name delisted before
+    #: the classification was observed appears in no constituent list, so
+    #: coverage over history is missing exactly the names that failed — the
+    #: direction that flatters, hence reported rather than assumed.
+    coverage: float
+    universe: int
+    rows: list[SectorRow]
+    note: str = ""
+
+
+def sector_breakdown(top: int = 100, venue: str = DEFAULT_VENUE) -> SectorResponse:
+    """The universe's industry composition.
+
+    Nothing in this system knew what a company does until the classification
+    was ingested; a book eleven-thirtieths in one industry looked, from every
+    screen, like thirty independent positions.
+    """
+    from collections import Counter  # noqa: PLC0415
+
+    from data.store.sectors import SectorStore  # noqa: PLC0415
+
+    view = SectorStore(settings.lake).view()
+    if not view.industries:
+        return SectorResponse(
+            observed_at=None,
+            coverage=0.0,
+            universe=0,
+            rows=[],
+            note="No classification ingested. Run: python -m apps.cli.ingest_sectors",
+        )
+
+    store = PanelStore(settings.lake, venue=venue)
+    universe = UniverseBuilder(store).build(
+        as_decision_time(utc_now()),
+        UniverseSpec(top_n=top, min_sessions=20, lookback_days=60),
+    )
+    members = [str(m) for m in universe.members]
+    if not members:
+        return SectorResponse(
+            observed_at=view.observed_at.isoformat() if view.observed_at else None,
+            coverage=0.0,
+            universe=0,
+            rows=[],
+            note="The universe is empty — ingest more sessions.",
+        )
+
+    counts = Counter(view.industry_of(m) or "unclassified" for m in members)
+    return SectorResponse(
+        observed_at=view.observed_at.isoformat() if view.observed_at else None,
+        coverage=view.coverage(members),
+        universe=len(members),
+        rows=[
+            SectorRow(industry=name, names=n, share=n / len(members))
+            for name, n in counts.most_common()
+        ],
+    )
 
 
 def _panel(venue: str = DEFAULT_VENUE) -> pl.DataFrame:
@@ -576,6 +653,15 @@ def build_analytics_router() -> APIRouter:
     _register_venues(router)
     _register_search(router)
     _register_security(router)
+
+    @router.get("/sectors", response_model=SectorResponse, dependencies=[ReadAccess])
+    def sectors(
+        top: int = Query(100, ge=2, le=500),
+        venue: str | None = None,
+    ) -> SectorResponse:
+        """What the tradable universe is made of, by industry."""
+        return sector_breakdown(top, _venue(venue))
+
     _register_quote(router)
     _register_watchlist(router)
     _register_cross_section(router)
