@@ -32,6 +32,11 @@ dependencies = [
     "python-dotenv>=1.0",
     # Free corporate-actions source for NSE (unofficial; see data/feeds/yahoo.py)
     "yfinance>=0.2.40",
+    # Ind-AS XBRL results documents (data/feeds/nse_results.py). Declared rather
+    # than leaned on: yfinance happens to pull it today, and a parser that stops
+    # importing because a *different* package dropped a dependency is a bad way
+    # to lose the fundamentals feed.
+    "lxml>=5.0",
     # zoneinfo has no tz database on Windows; this supplies it
     "tzdata>=2024.1",
 ]
@@ -151,7 +156,7 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = [
     "statsmodels.*", "arch.*", "cvxpy.*", "duckdb.*", "yfinance.*",
-    "sklearn.*", "scipy.*", "exchange_calendars.*",
+    "sklearn.*", "scipy.*", "exchange_calendars.*", "lxml.*",
 ]
 ignore_missing_imports = true
 

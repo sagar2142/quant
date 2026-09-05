@@ -167,6 +167,51 @@ def _classification_is_stale(lake: Path, max_age_days: int) -> bool:
     return (utc_now().date() - held[-1]).days >= max_age_days
 
 
+def _results_are_stale(lake: Path, max_age_days: int) -> bool:
+    """Whether the newest quarterly filing held is old enough to refetch.
+
+    Measured against the newest `receive_time` rather than the fetch date: what
+    matters is whether a company has published something since, and during a
+    results season that happens most evenings.
+    """
+    from data.store.fundamentals import FundamentalStore  # noqa: PLC0415
+
+    newest = FundamentalStore(lake).newest_filing()
+    if newest is None:
+        return True
+    return (utc_now() - newest).days >= max_age_days
+
+
+def _run_cadenced(lake: Path, args: argparse.Namespace) -> None:
+    """The feeds that are not daily.
+
+    Neither of these is a session feed, so neither belongs in the plan: a
+    bhavcopy exists once per trading day and is either held or missing, while
+    these are refetched when what is held has gone stale. Their failures are
+    printed by their own runners and do not fail the ingest — a bhavcopy that
+    landed is a good evening whatever the classification did.
+    """
+    lake_args = ["--lake", str(lake)] if args.lake else []
+
+    # Industry classification: NSE changes index membership at reviews and an
+    # industry label almost never moves, so a daily fetch would be a request a
+    # day to learn nothing.
+    if _classification_is_stale(lake, args.classify_after_days):
+        print(f"\n[sectors] classification older than {args.classify_after_days} days")
+        from apps.cli import ingest_sectors  # noqa: PLC0415 - only on the cadence
+
+        ingest_sectors.run(lake_args)
+
+    # Quarterly results: companies report in clusters over the six weeks after
+    # a quarter ends and nothing at all between, so most evenings this asks to
+    # be told the same thing again — but during a season it changes daily.
+    if args.results_after_days and _results_are_stale(lake, args.results_after_days):
+        print(f"\n[results] filings older than {args.results_after_days} days")
+        from apps.cli import ingest_results  # noqa: PLC0415 - only on the cadence
+
+        ingest_results.run(lake_args)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch every feed's missing sessions")
     parser.add_argument(
@@ -209,6 +254,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "fetch would learn nothing."
         ),
     )
+    parser.add_argument(
+        "--results-after-days",
+        type=int,
+        default=2,
+        help=(
+            "Refetch quarterly results when the newest filing held is this old. "
+            "0 never fetches them."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -238,14 +292,7 @@ def run(argv: list[str] | None = None) -> int:
 
     _report(outcomes)
 
-    # Industry classification, on a cadence rather than every run: NSE changes
-    # index membership at reviews and an industry label almost never moves, so
-    # a daily fetch would be a request a day to learn nothing.
-    if _classification_is_stale(lake, args.classify_after_days):
-        print(f"\n[sectors] classification older than {args.classify_after_days} days")
-        from apps.cli import ingest_sectors  # noqa: PLC0415 - only on the cadence
-
-        ingest_sectors.run(["--lake", str(lake)] if args.lake else [])
+    _run_cadenced(lake, args)
 
     # Alerts last, on the lake this run produced. Evaluating before the ingest
     # would test yesterday's data and report it as today's.
