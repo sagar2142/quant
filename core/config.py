@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     #: explicitly true, whatever any strategy or agent believes (§21).
     live_enabled: bool = Field(default=False)
 
+    #: Which broker places orders. `NEUTRON_BROKER=groww` or `kite`.
+    #:
+    #: Named rather than inferred from whichever credentials happen to be in
+    #: the environment: a machine with both sets configured would otherwise
+    #: route by accident, and "which broker did that order go to" is not a
+    #: question anyone should have to answer after the fact.
+    broker: str = Field(default="groww")
+
     #: Console API token. Empty means reads are open on loopback and the kill
     #: switch is disabled outright — an install that was never configured
     #: cannot release a halt, which is the fail-safe direction (§21).
