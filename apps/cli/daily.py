@@ -195,6 +195,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run the data-quality suite afterwards",
     )
     parser.add_argument(
+        "--alerts",
+        action="store_true",
+        help="Evaluate the alert rules against the lake this run produced",
+    )
+    parser.add_argument(
         "--classify-after-days",
         type=int,
         default=7,
@@ -241,6 +246,18 @@ def run(argv: list[str] | None = None) -> int:
         from apps.cli import ingest_sectors  # noqa: PLC0415 - only on the cadence
 
         ingest_sectors.run(["--lake", str(lake)] if args.lake else [])
+
+    # Alerts last, on the lake this run produced. Evaluating before the ingest
+    # would test yesterday's data and report it as today's.
+    if args.alerts:
+        from apps.cli import watch  # noqa: PLC0415 - only when asked
+
+        print("\n" + "=" * 68)
+        print("  ALERTS")
+        print("=" * 68)
+        # Its exit code is not the ingest's: a rule that could not be evaluated
+        # is worth saying and is not a failed download.
+        watch.run(["--lake", str(lake)] if args.lake else [])
 
     if args.check:
         # After, not before: the check should judge the lake this run produced.
