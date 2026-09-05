@@ -71,6 +71,10 @@ class RuleKind(str, Enum):
     FEED_STALE_HOURS = "feed_stale_hours"
     #: A named risk limit's observed value has reached its threshold.
     RISK_LIMIT_AT = "risk_limit_at"
+    #: A company has announced a board meeting to consider results within this
+    #: many days. Positional, not predictive: it says a held name is about to
+    #: be repriced by an event, which is a risk question.
+    REPORTS_WITHIN_DAYS = "reports_within_days"
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class Rule:
             RuleKind.MOVED_MORE_THAN,
             RuleKind.FEED_STALE_HOURS,
             RuleKind.RISK_LIMIT_AT,
+            RuleKind.REPORTS_WITHIN_DAYS,
         }
         if self.kind in needs_subject and not self.subject.strip():
             raise ValueError(f"{self.kind.value} needs a subject")
@@ -120,6 +125,14 @@ class WatchContext:
     feed_age_hours: dict[str, float] = field(default_factory=dict)
     #: Limit name -> observed value. Absent means unmeasured, not zero.
     risk_observations: dict[str, Decimal] = field(default_factory=dict)
+    #: Instrument id or symbol -> days until its announced results meeting.
+    #: Absent means no meeting is announced *or* the calendar could not be
+    #: read, and `days_to_results_known` is what separates the two.
+    days_to_results: dict[str, int] = field(default_factory=dict)
+    #: Whether a calendar was available at all. Without this an unreadable
+    #: calendar would look exactly like a quiet one, and a rule that silently
+    #: never fires is the failure this module exists to prevent.
+    days_to_results_known: bool = False
 
 
 @dataclass(frozen=True)
@@ -236,6 +249,33 @@ def _risk_rule(rule: Rule, context: WatchContext) -> Trigger:
     )
 
 
+def _results_rule(rule: Rule, context: WatchContext) -> Trigger:
+    """Whether a name reports within the threshold number of days.
+
+    An unreadable calendar is unevaluable, not quiet. The distinction is the
+    whole point: "nothing is announced" and "I could not find out" are opposite
+    answers, and only one of them means it is safe to hold through the week.
+    """
+    if not context.days_to_results_known:
+        return unevaluable(rule, "no calendar to read announced meetings from")
+    days = context.days_to_results.get(rule.subject) or context.days_to_results.get(
+        rule.subject.upper()
+    )
+    if days is None:
+        return Trigger(
+            rule=rule,
+            fired=False,
+            observed=Decimal(-1),
+            reason=f"{rule.subject} has no announced results meeting",
+        )
+    return Trigger(
+        rule=rule,
+        fired=Decimal(days) <= rule.threshold,
+        observed=Decimal(days),
+        reason=f"{rule.subject} reports in {days} day(s) (within {rule.threshold})",
+    )
+
+
 #: One evaluator per kind. A dict rather than a chain of branches so that
 #: adding a kind without an evaluator is a `KeyError` at the point of use
 #: rather than a rule that silently never fires.
@@ -246,6 +286,7 @@ _EVALUATORS: dict[RuleKind, Callable[[Rule, WatchContext], Trigger]] = {
     RuleKind.DRAWDOWN_BEYOND: _drawdown_rule,
     RuleKind.FEED_STALE_HOURS: _stale_rule,
     RuleKind.RISK_LIMIT_AT: _risk_rule,
+    RuleKind.REPORTS_WITHIN_DAYS: _results_rule,
 }
 
 

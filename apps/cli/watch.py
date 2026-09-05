@@ -30,7 +30,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,15 @@ STATE_FILE = "state.json"
 #: three is the margin for a name that did not trade yesterday.
 RECENT_SESSIONS = 3
 
+#: How far ahead the results calendar is read. A rule may set any threshold up
+#: to this; beyond it the announcement is too far off to act on.
+MAX_RESULTS_HORIZON = 30
+
+#: A calendar older than this is treated as no calendar at all. Companies
+#: announce meetings a few days ahead, so a fortnight-old fetch reporting
+#: "nothing announced" is a false all-clear rather than useful quiet.
+STALE_CALENDAR_DAYS = 7
+
 EXAMPLE_RULES: list[dict[str, Any]] = [
     {
         "rule_id": "nse-feed-stale",
@@ -67,6 +76,14 @@ EXAMPLE_RULES: list[dict[str, Any]] = [
         "threshold": "-0.05",
         "severity": "WARN",
         "note": "first ladder rung",
+    },
+    {
+        "rule_id": "reliance-reports-soon",
+        "kind": "reports_within_days",
+        "subject": "RELIANCE",
+        "threshold": "3",
+        "severity": "WARN",
+        "note": "earnings inside the week; size the position for a gap",
     },
     {
         "rule_id": "reliance-below-2400",
@@ -208,13 +225,40 @@ def assemble_context(lake: Path, venue: str = "NSE") -> WatchContext:
     except Exception:  # noqa: BLE001 - no book is a state, not a failure
         drawdown = None
 
+    days_to_results, calendar_known = _announced_results(lake, now.date())
+
     return WatchContext(
         as_of=now,
         closes=closes,
         previous_closes=previous,
         drawdown=drawdown,
         feed_age_hours=feed_ages,
+        days_to_results=days_to_results,
+        days_to_results_known=calendar_known,
     )
+
+
+def _announced_results(lake: Path, today: date) -> tuple[dict[str, int], bool]:
+    """Days until each name's announced results meeting, and whether we know.
+
+    The second half of the pair is what stops an unread calendar from looking
+    like a quiet one. A stale calendar is treated as no calendar: one fetched
+    a fortnight ago has no useful opinion about the coming week, and reporting
+    "nothing announced" from it would be a false all-clear.
+    """
+    from data.store.events import EventStore  # noqa: PLC0415 - only when asked
+
+    window = EventStore(lake).upcoming(today, within_days=MAX_RESULTS_HORIZON, results_only=True)
+    if window.observed_at is None or window.age_days > STALE_CALENDAR_DAYS:
+        return {}, False
+
+    days: dict[str, int] = {}
+    for row in window.rows.iter_rows(named=True):
+        ahead = (row["event_date"] - today).days
+        for key in (row["symbol"], row["instrument_id"]):
+            if key and (key not in days or ahead < days[key]):
+                days[key] = ahead
+    return days, True
 
 
 def _announce(trigger: Trigger, was_firing: bool, router: AlertRouter, dry_run: bool) -> str | None:

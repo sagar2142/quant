@@ -183,11 +183,12 @@ def _results_are_stale(lake: Path, max_age_days: int) -> bool:
 
 
 def _run_cadenced(lake: Path, args: argparse.Namespace) -> None:
-    """The feeds that are not daily.
+    """The feeds that are not sessions.
 
-    Neither of these is a session feed, so neither belongs in the plan: a
-    bhavcopy exists once per trading day and is either held or missing, while
-    these are refetched when what is held has gone stale. Their failures are
+    None of these is a session feed, so none belongs in the plan: a bhavcopy
+    exists once per trading day and is either held or missing, while these are
+    refetched when what is held has gone stale, or — for the calendar, which
+    has no archive to fall back on — whenever asked. Their failures are
     printed by their own runners and do not fail the ingest — a bhavcopy that
     landed is a good evening whatever the classification did.
     """
@@ -210,6 +211,15 @@ def _run_cadenced(lake: Path, args: argparse.Namespace) -> None:
         from apps.cli import ingest_results  # noqa: PLC0415 - only on the cadence
 
         ingest_results.run(lake_args)
+
+    # The announced calendar, every run. NSE keeps no archive of it, so an
+    # evening skipped is a day of the calendar nobody can recover — and a
+    # calendar read from a week-old file reports quiet it cannot vouch for.
+    if args.events:
+        print("\n[events] fetching the announced calendar")
+        from apps.cli import ingest_events  # noqa: PLC0415 - only when asked
+
+        ingest_events.run(lake_args)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -252,6 +262,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Refetch the industry classification when it is this old. 0 never "
             "fetches it. NSE changes index membership at reviews, so a daily "
             "fetch would learn nothing."
+        ),
+    )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help=(
+            "Fetch the announced board-meeting calendar. NSE keeps no archive, "
+            "so a skipped evening is unrecoverable."
         ),
     )
     parser.add_argument(
