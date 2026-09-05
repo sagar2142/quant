@@ -33,33 +33,36 @@ import numpy.typing as npt
 import polars as pl
 
 from apps.cli.backtest import build_universe, load_panel, nse_instrument
+from apps.cli.pool import JobSpec, Workload, auto_workers, run_jobs
 from apps.cli.runners import Runners, build_runners, sweep_configurations
 from apps.cli.runs import (
     COMPARE_FRACTION,
     MOMENTUM_TOP_FRACTION,
     NSE_SESSIONS,
     SEED,
+    SWEEP_TOP_FRACTION,
     Panel,
     SweepTooShortError,
     build_market,
     corrupt_future,
+    factor_scores,
 )
 from core.config import settings
 from core.instruments import InstrumentId
 from data.store.bars import NoDataError
 from data.store.panel import PanelStore
 from engine.backtest import BacktestConfig, BacktestEngine
-from engine.experiments.recording import RunInputs, record_run
+from engine.experiments.recording import RunInputs, exploratory_hypothesis, record_run
 from engine.experiments.registry import HypothesisStatus
 from engine.experiments.repository import ExperimentRepository, UnregisteredHypothesisError
 from engine.validation import GauntletInputs, run_gauntlet
 from engine.validation.generators import (
-    DROPOUT_FRACTION,
     SamplingSpec,
+    dropout_subsets,
     market_proxy,
-    placebo_sharpes,
+    placebo_seeds,
     regime_slices,
-    universe_dropout_sharpes,
+    sharpes_from,
 )
 from engine.validation.report import MIN_DROPOUT_SAMPLES, MIN_PLACEBO_SAMPLES, GauntletReport
 from ops.db import optional_connection
@@ -68,29 +71,55 @@ from quant.research.factors import Factor
 from quant.strategies.baselines import CrossSectionalMomentum
 
 
-def resolve_trials(hypothesis: str | None, sweep_size: int) -> tuple[int, bool]:
+def strategy_name_for(args: argparse.Namespace) -> str:
+    """What this run is called, for the experiment row and the standing bucket.
+
+    Derived in one place because it is used twice, in `resolve_trials` (which
+    *reads* the trial count) and in `record_gauntlet_run` (which *writes* it).
+    Two independent copies of this expression would let the two drift, and the
+    result would be a run counted against one hypothesis and deflated against
+    another — a discrepancy that shows up as a DSR that never quite moves.
+    """
+    return f"factor:{args.factor}" if args.factor else "xs_momentum"
+
+
+def resolve_trials(
+    hypothesis: str | None, sweep_size: int, strategy_name: str = "xs_momentum"
+) -> tuple[int, bool]:
     """Cumulative trials behind this candidate, and whether that is verified.
 
     The durable count lives in `hypotheses.n_trials`, incremented by a database
     trigger on every recorded experiment so that no code path can forget it.
     The sweep about to run has not been recorded yet, so it is added on top.
 
+    Args:
+        hypothesis: The pre-registered hypothesis id, or None for an
+            exploratory run.
+        sweep_size: Configurations this run is about to try.
+        strategy_name: Identifies the standing exploratory bucket when no
+            hypothesis was registered.
+
     Returns:
-        `(n_trials, verified)`. When the database is unreachable or the
-        hypothesis is unknown, the sweep size is returned with `verified=False`
-        — a number the report still prints, but one the DSR check refuses to
-        pass on. Falling back silently to the sweep size is what made the
-        deflation cosmetic in the first place.
+        `(n_trials, verified)`. `verified` is False for an exploratory run and
+        whenever the count cannot be read — a number the report still prints,
+        but one the DSR check refuses to pass on. Falling back silently to the
+        sweep size is what made the deflation cosmetic in the first place.
+
+    Note:
+        An exploratory run still reads the standing bucket's accumulated count
+        rather than starting from zero. It cannot make the DSR *pass*, but a
+        larger count deflates harder, and the tenth unregistered attempt at a
+        strategy should not be scored as though it were the first.
     """
     if hypothesis is None:
+        identifier = exploratory_hypothesis(strategy_name).hypothesis_id
         print("trials: no --hypothesis given; DSR cannot pass on an unverified count")
-        return sweep_size, False
-
-    try:
-        identifier = uuid.UUID(hypothesis)
-    except ValueError:
-        print(f"trials: {hypothesis!r} is not a UUID; DSR cannot pass")
-        return sweep_size, False
+    else:
+        try:
+            identifier = uuid.UUID(hypothesis)
+        except ValueError:
+            print(f"trials: {hypothesis!r} is not a UUID; DSR cannot pass")
+            return sweep_size, False
 
     with optional_connection() as connection:
         if connection is None:
@@ -99,12 +128,20 @@ def resolve_trials(hypothesis: str | None, sweep_size: int) -> tuple[int, bool]:
         try:
             prior = ExperimentRepository(connection).trials_for(identifier)
         except UnregisteredHypothesisError:
+            # An exploratory bucket that has never been written to is simply
+            # empty, not an error — it is created when this run is recorded.
+            if hypothesis is None:
+                return sweep_size, False
             print(f"trials: hypothesis {identifier} is not registered; DSR cannot pass")
             return sweep_size, False
 
     total = prior + sweep_size
-    print(f"trials: {prior} recorded + {sweep_size} in this sweep = {total} (verified)")
-    return total, True
+    verified = hypothesis is not None
+    print(
+        f"trials: {prior} recorded + {sweep_size} in this sweep = {total}"
+        f" ({'verified' if verified else 'exploratory, unverified'})"
+    )
+    return total, verified
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -162,6 +199,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--placebo-samples", type=int, default=MIN_PLACEBO_SAMPLES, help="Test 10 random runs"
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help=(
+            "Processes to run the independent backtests across. 0 picks from "
+            "the machine, 1 stays sequential. Results are identical either "
+            "way — the sample plan is drawn before anything is dispatched."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -213,6 +260,55 @@ def load_market(args: argparse.Namespace) -> tuple[Panel, list[float]] | None:
     return panel, equity
 
 
+def _base_job(
+    args: argparse.Namespace,
+    universe: tuple[InstrumentId, ...],
+    top_fraction: str | None = None,
+) -> JobSpec:
+    """One job in the shape this run's strategy takes.
+
+    Explicit parameters rather than `**overrides`: a job is the record of what
+    was run, and a typo'd keyword silently becoming a default is exactly the
+    kind of thing that makes two runs differ for a reason nobody can find.
+    """
+    return JobSpec(
+        kind="factor" if args.factor else "momentum",
+        lookback=args.lookback,
+        skip=args.skip,
+        universe=universe,
+        factor_top_fraction=top_fraction or str(args.top_fraction),
+    )
+
+
+def _sweep_jobs(
+    args: argparse.Namespace, universe: tuple[InstrumentId, ...]
+) -> list[tuple[str, JobSpec]]:
+    """The parameter sweep, as jobs plus the labels they carry.
+
+    Mirrors `Runners.sweep` exactly — same configurations, same order, same
+    labels — because the neighbourhood plot and the PBO matrix are built from
+    it and a different order would rank a different thing.
+    """
+    if args.factor:
+        return [
+            (f"top {frac:.0%}", _base_job(args, universe, top_fraction=str(frac)))
+            for frac in SWEEP_TOP_FRACTION
+        ]
+    return [
+        (
+            f"{lookback}/{skip}",
+            JobSpec(kind="momentum", lookback=lookback, skip=skip, universe=universe),
+        )
+        for lookback, skip in sweep_configurations()
+    ]
+
+
+def _placebo_n_names(args: argparse.Namespace, universe: tuple[InstrumentId, ...]) -> int:
+    """How many names the control holds — matched to the strategy under test."""
+    fraction = float(args.top_fraction) if args.factor else float(MOMENTUM_TOP_FRACTION)
+    return max(1, int(len(universe) * fraction))
+
+
 def assemble_inputs(
     panel: Panel,
     args: argparse.Namespace,
@@ -231,10 +327,58 @@ def assemble_inputs(
     size = int(min(baseline.size, corrupted.size) * COMPARE_FRACTION)
     shuffled = np.concatenate([corrupted[:size], baseline[size:]])
 
+    # The sweep, the dropout subsets and the placebo seeds are sixty-odd
+    # independent backtests that share only the panel. They are dispatched
+    # together so the pool is started once rather than three times, and the
+    # results are sliced back apart in submission order.
+    shared = Workload(
+        history=history,
+        instruments=panel.instruments,
+        universe=panel.universe,
+        scores=factor_scores(panel, Factor(args.factor), args.sessions) if args.factor else None,
+    )
+    sweep_plan = _sweep_jobs(args, panel.universe)
+    subsets = dropout_subsets(
+        panel.universe,
+        SamplingSpec(seed=SEED, samples=args.dropout_samples, periods_per_year=NSE_SESSIONS),
+    )
+    seeds = placebo_seeds(
+        SamplingSpec(seed=SEED, samples=args.placebo_samples, periods_per_year=NSE_SESSIONS)
+    )
+    n_names = _placebo_n_names(args, panel.universe)
+
+    jobs = (
+        [job for _, job in sweep_plan]
+        + [_base_job(args, subset) for subset in subsets]
+        + [
+            JobSpec(
+                kind="placebo",
+                lookback=args.lookback,
+                skip=args.skip,
+                universe=panel.universe,
+                seed=seed,
+                n_names=n_names,
+            )
+            for seed in seeds
+        ]
+    )
+    workers = auto_workers(len(jobs), args.workers)
+    print(
+        f"running {len(jobs)} backtests"
+        + (f" across {workers} processes..." if workers > 1 else " one at a time...")
+    )
+    outcomes = run_jobs(jobs, shared, workers=args.workers)
+
+    cut_sweep = len(sweep_plan)
+    cut_dropout = cut_sweep + len(subsets)
+    sweep_returns = outcomes[:cut_sweep]
+    dropout_returns = outcomes[cut_sweep:cut_dropout]
+    placebo_returns = outcomes[cut_dropout:]
+
     sweep: list[npt.NDArray[np.float64]] = []
     neighbourhood: list[float] = []
     labels: list[str] = []
-    for label, rets in runners.sweep(panel):
+    for (label, _), rets in zip(sweep_plan, sweep_returns, strict=True):
         if rets.size:
             sweep.append(rets)
             neighbourhood.append(summarise(rets, periods_per_year=NSE_SESSIONS).sharpe)
@@ -247,24 +391,23 @@ def assemble_inputs(
     sweep_matrix = np.column_stack([r[:width] for r in sweep])
     split = baseline.size // 2
 
-    print(f"universe dropout: {args.dropout_samples} subsets at {DROPOUT_FRACTION:.0%} removed...")
-    dropout = universe_dropout_sharpes(
-        runners.dropout(panel),
-        panel.universe,
-        SamplingSpec(seed=SEED, samples=args.dropout_samples, periods_per_year=NSE_SESSIONS),
+    dropout_spec = SamplingSpec(
+        seed=SEED, samples=args.dropout_samples, periods_per_year=NSE_SESSIONS
     )
+    dropout = sharpes_from(dropout_returns, dropout_spec)
+    print(f"universe dropout: {dropout.size}/{len(subsets)} subsets scored")
 
-    print(f"placebo: {args.placebo_samples} random-entry runs...")
-    placebo = placebo_sharpes(
-        runners.placebo(panel),
-        SamplingSpec(seed=SEED, samples=args.placebo_samples, periods_per_year=NSE_SESSIONS),
+    placebo_spec = SamplingSpec(
+        seed=SEED, samples=args.placebo_samples, periods_per_year=NSE_SESSIONS
     )
+    placebo = sharpes_from(placebo_returns, placebo_spec)
+    print(f"placebo: {placebo.size}/{len(seeds)} random-entry runs scored")
 
     market = market_proxy(history, panel.universe)
     regimes = regime_slices(baseline, market["market_return"].to_numpy())
     print(f"regimes found: {', '.join(sorted(regimes)) if regimes else 'none — sample too short'}")
 
-    n_trials, trials_verified = resolve_trials(args.hypothesis, len(sweep))
+    n_trials, trials_verified = resolve_trials(args.hypothesis, len(sweep), strategy_name_for(args))
 
     inputs = GauntletInputs(
         returns=baseline,
@@ -298,9 +441,18 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
     Recorded after the verdict, not before: the gauntlet's own results are part
     of the row, and a run that crashed mid-gauntlet should not be counted as a
     trial that produced an answer.
+
+    **A run with no pre-registered hypothesis is still counted.** It used to
+    return here, which meant every exploratory pass was invisible to the
+    counter — and those are precisely the trials that inflate the maximum
+    Sharpe eventually found (§5.2). Under-counting moves the Deflated Sharpe
+    only ever toward accept, so the run is booked against a standing
+    exploratory hypothesis instead, whose mechanism text says plainly that none
+    was offered. The console can start a gauntlet in two clicks, which makes
+    this the common case rather than the exception.
     """
-    if args.hypothesis is None:
-        return
+    strategy_name = strategy_name_for(args)
+    exploratory = args.hypothesis is None
 
     with optional_connection() as connection:
         if connection is None:
@@ -308,7 +460,12 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
             return
         try:
             repository = ExperimentRepository(connection)
-            hypothesis = repository.hypothesis(uuid.UUID(args.hypothesis))
+            if exploratory:
+                standing = exploratory_hypothesis(strategy_name)
+                repository.ensure_hypothesis(standing)
+                hypothesis = standing
+            else:
+                hypothesis = repository.hypothesis(uuid.UUID(args.hypothesis))
         except (ValueError, UnregisteredHypothesisError) as exc:
             print(f"run not recorded: {exc}")
             return
@@ -316,16 +473,22 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
         # The gauntlet is stage 7 and the authority on confirmation: stage 3
         # can reject a signal but never confirm one, so a hypothesis is closed
         # positively here or not at all.
-        repository.resolve_hypothesis(
-            hypothesis.hypothesis_id,
-            HypothesisStatus.CONFIRMED if report.passed else HypothesisStatus.REJECTED,
-        )
+        #
+        # Never for the exploratory bucket. That is a standing container for
+        # uncounted trials, not a claim under test, and resolving it would
+        # close every future exploratory run's home on the strength of one
+        # unregistered pass.
+        if not exploratory:
+            repository.resolve_hypothesis(
+                hypothesis.hypothesis_id,
+                HypothesisStatus.CONFIRMED if report.passed else HypothesisStatus.REJECTED,
+            )
 
         record = record_run(
             connection,
             RunInputs(
                 hypothesis=hypothesis,
-                strategy_name="xs_momentum",
+                strategy_name=strategy_name,
                 parameters={"lookback": args.lookback, "skip": args.skip, "top": args.top},
                 universe=[str(i) for i in panel.universe],
                 history=panel.history,
@@ -335,9 +498,15 @@ def record_gauntlet_run(args: argparse.Namespace, panel: Panel, report: Gauntlet
             ),
             gauntlet=report,
         )
-    verdict = "CONFIRMED" if report.passed else "REJECTED"
     print(f"recorded: experiment {record.experiment_id}, trial count now {record.trials}")
-    print(f"hypothesis {args.hypothesis} resolved {verdict}")
+    if exploratory:
+        print(
+            "no hypothesis was pre-registered, so this counts as an exploratory trial "
+            "and resolves nothing"
+        )
+    else:
+        verdict = "CONFIRMED" if report.passed else "REJECTED"
+        print(f"hypothesis {args.hypothesis} resolved {verdict}")
 
 
 def run(argv: list[str] | None = None) -> int:

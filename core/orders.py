@@ -137,7 +137,3 @@ LEGAL_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
     OrderState.REJECTED: frozenset(),
     OrderState.CANCELLED: frozenset(),
 }
-
-
-def is_legal_transition(current: OrderState, target: OrderState) -> bool:
-    return target in LEGAL_TRANSITIONS[current]

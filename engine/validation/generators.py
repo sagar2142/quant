@@ -37,7 +37,7 @@ from engine.validation.report import (
 from quant.math.metrics.performance import sharpe_ratio
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     import polars as pl
 
@@ -46,9 +46,12 @@ if TYPE_CHECKING:
 __all__ = [
     "REGIME_MIN_BARS",
     "SamplingSpec",
+    "dropout_subsets",
     "market_proxy",
+    "placebo_seeds",
     "placebo_sharpes",
     "regime_slices",
+    "sharpes_from",
     "universe_dropout_sharpes",
 ]
 
@@ -136,15 +139,50 @@ def universe_dropout_sharpes(
             "test 8 cannot distinguish a broad edge from a concentrated one here"
         )
 
+    return sharpes_from(
+        (run(subset) for subset in dropout_subsets(universe, spec, drop_fraction=drop_fraction)),
+        spec,
+    )
+
+
+def dropout_subsets(
+    universe: Sequence[InstrumentId],
+    spec: SamplingSpec,
+    *,
+    drop_fraction: float = DROPOUT_FRACTION,
+) -> list[tuple[InstrumentId, ...]]:
+    """The subsets test 8 will run, drawn up front.
+
+    **Separated from the running so the two cannot drift.** The plan is a pure
+    function of `(universe, seed, samples)`, which is what lets the runs happen
+    in any order — several at once, in other processes — and still produce the
+    identical list of Sharpes. Determinism is the M3 gate, and it is easier to
+    hold when the random draw is one place and the execution is another.
+    """
+    members = tuple(sorted(universe))
+    keep = max(2, round(len(members) * (1 - drop_fraction)))
     rng = np.random.default_rng(spec.seed)
-    sharpes: list[float] = []
+    subsets: list[tuple[InstrumentId, ...]] = []
     for _ in range(spec.samples):
         chosen = rng.choice(len(members), size=keep, replace=False)
-        subset = tuple(members[int(i)] for i in sorted(chosen))
-        returns = array_or_none(run(subset))
-        if returns is None:
-            continue
-        sharpes.append(sharpe_ratio(returns, periods_per_year=spec.periods_per_year))
+        subsets.append(tuple(members[int(i)] for i in sorted(chosen)))
+    return subsets
+
+
+def sharpes_from(
+    runs: Iterable[npt.ArrayLike | None], spec: SamplingSpec
+) -> npt.NDArray[np.float64]:
+    """Sharpe per run, dropping the ones that produced nothing.
+
+    Dropped rather than recorded as zero: a subset too small to trade did not
+    earn nothing, it was not measured, and a zero would drag the percentile
+    toward a number no run actually produced.
+    """
+    sharpes = [
+        sharpe_ratio(returns, periods_per_year=spec.periods_per_year)
+        for returns in (array_or_none(one) for one in runs)
+        if returns is not None
+    ]
     return np.asarray(sharpes, dtype=np.float64)
 
 
@@ -248,18 +286,18 @@ def placebo_sharpes(run: SeededRunner, spec: SamplingSpec) -> npt.NDArray[np.flo
     the 95th percentile of coin flips, and that percentile cannot be estimated
     from a handful of draws.
     """
-    rng = np.random.default_rng(spec.seed)
-    # Drawn up front so the seed sequence does not depend on how many runs
-    # happen to produce returns.
-    seeds = rng.integers(0, 2**31 - 1, size=spec.samples)
+    return sharpes_from((run(seed) for seed in placebo_seeds(spec)), spec)
 
-    sharpes: list[float] = []
-    for one in seeds:
-        returns = array_or_none(run(int(one)))
-        if returns is None:
-            continue
-        sharpes.append(sharpe_ratio(returns, periods_per_year=spec.periods_per_year))
-    return np.asarray(sharpes, dtype=np.float64)
+
+def placebo_seeds(spec: SamplingSpec) -> list[int]:
+    """The seeds test 10 will run, drawn up front.
+
+    Up front so the sequence does not depend on how many runs happen to produce
+    returns — and, like `dropout_subsets`, so the plan is separable from the
+    execution and the runs can happen in any order.
+    """
+    rng = np.random.default_rng(spec.seed)
+    return [int(one) for one in rng.integers(0, 2**31 - 1, size=spec.samples)]
 
 
 def _pad(reduced: npt.NDArray[np.float64], size: int, window: int) -> npt.NDArray[np.float64]:

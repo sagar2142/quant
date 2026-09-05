@@ -57,6 +57,27 @@ class GauntletResult:
     reason: str = ""
     skipped: bool = False
 
+    def __post_init__(self) -> None:
+        """Coerce numpy scalars to Python ones.
+
+        **A verdict has to survive leaving this process.** Comparing numpy
+        floats yields `np.bool_`, not `bool`, and a check written the obvious
+        way — `passed=sharpe > 0` — produces one without anything looking
+        wrong. It prints fine, tests fine, and then the console asks for the
+        result as JSON and pydantic refuses: "Unable to serialize unknown type:
+        <class 'numpy.bool'>". Two of the twelve checks did exactly this.
+
+        Normalised here rather than at each check, because the next check
+        written will make the same mistake and this is the one place that sees
+        every one of them.
+        """
+        object.__setattr__(self, "passed", bool(self.passed))
+        object.__setattr__(self, "skipped", bool(self.skipped))
+        if self.statistic is not None:
+            object.__setattr__(self, "statistic", float(self.statistic))
+        if self.threshold is not None:
+            object.__setattr__(self, "threshold", float(self.threshold))
+
     def format(self) -> str:
         if self.skipped:
             return f"  [SKIP] {self.test:<24} {self.reason}"
@@ -167,4 +188,23 @@ def array_or_none(values: npt.ArrayLike | None) -> npt.NDArray[np.float64] | Non
 def skipped(test: str, missing: str) -> GauntletResult:
     return GauntletResult(
         test=test, passed=False, skipped=True, reason=f"not run: {missing} not supplied"
+    )
+
+
+def too_few(test: str, supplied: int, needed: int, knob: str) -> GauntletResult:
+    """Skipped because the sample is too small to read a percentile from.
+
+    Distinct from `skipped`, and the distinction is the whole point: "not
+    supplied" means a generator is not wired and there is nothing an operator
+    can do at the command line, while this means the run asked for too few and
+    the fix is a flag. Reporting both as "not supplied" sent the reader to
+    check the harness when the answer was to raise a number.
+    """
+    return GauntletResult(
+        test=test,
+        passed=False,
+        skipped=True,
+        statistic=float(supplied),
+        threshold=float(needed),
+        reason=f"only {supplied} sample(s), needs {needed} — raise {knob}",
     )

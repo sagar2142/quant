@@ -1,17 +1,20 @@
-"""Resampling tests — MASTER_PLAN §5.4 tests 10 and 11.
+"""Monte Carlo trade shuffling — MASTER_PLAN §5.4 test 11.
 
-Distribution-free ways to ask "could this have happened by chance?", which is
-the only honest question to ask of a backtest.
-
-**Every function takes an explicit seed** (§14.1.1). An unseeded resampling test
-gives a different answer each run, which means it can be re-rolled until it
-agrees with you — the exact failure mode the gauntlet exists to prevent.
-
-**Monte Carlo trade shuffling** answers a different question from the bootstrap.
 Shuffling the *order* of trades preserves the return distribution exactly while
 destroying the sequence, which isolates how much of a drawdown was sequence
 luck. A strategy whose 5th-percentile shuffled drawdown is twice its realised
 one got lucky in the ordering.
+
+**The seed is explicit** (§14.1.1). An unseeded resampling test gives a
+different answer each run, which means it can be re-rolled until it agrees with
+you — the exact failure mode the gauntlet exists to prevent.
+
+This module once also carried an IID bootstrap, a block bootstrap and a
+permutation test. All three were written, exported, never called and never
+tested — 40% of the file was unreachable. They are the sort of thing that reads
+as capability on a shelf and behaves as untested code the first time someone
+reaches for it, so they are gone. `quant.math.metrics.overfitting` holds the
+resampling the gauntlet actually uses.
 """
 
 from __future__ import annotations
@@ -21,157 +24,14 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from quant.math.metrics.performance import max_drawdown, sharpe_ratio
+from quant.math.metrics.performance import max_drawdown
 
-__all__ = [
-    "BootstrapResult",
-    "ShuffleResult",
-    "block_bootstrap",
-    "bootstrap_sharpe",
-    "monte_carlo_drawdown",
-    "permutation_test",
-]
+__all__ = ["ShuffleResult", "monte_carlo_drawdown"]
 
 FloatArray = npt.NDArray[np.float64]
 
-#: Below this many observations a resampled statistic is noise, not evidence.
-MIN_OBS_RESAMPLE = 4
+#: Below this many trades a shuffled drawdown is noise, not evidence.
 MIN_TRADES_SHUFFLE = 2
-
-
-@dataclass(frozen=True)
-class BootstrapResult:
-    point_estimate: float
-    lower: float
-    upper: float
-    confidence: float
-    n_resamples: int
-
-    @property
-    def excludes_zero(self) -> bool:
-        """Whether the interval is entirely one side of zero."""
-        return self.lower > 0.0 or self.upper < 0.0
-
-    def format(self) -> str:
-        return (
-            f"  {self.point_estimate:.3f} "
-            f"[{self.lower:.3f}, {self.upper:.3f}] at {self.confidence:.0%} "
-            f"({self.n_resamples} resamples)"
-        )
-
-
-def bootstrap_sharpe(
-    returns: npt.ArrayLike,
-    seed: int,
-    n_resamples: int = 2000,
-    confidence: float = 0.95,
-    periods_per_year: int = 252,
-) -> BootstrapResult:
-    """Confidence interval for the Sharpe ratio by IID bootstrap.
-
-    Makes no normality assumption, which matters because trading returns are
-    reliably non-normal. Note it *does* assume independence — for autocorrelated
-    returns use `block_bootstrap` instead.
-    """
-    rets = np.asarray(returns, dtype=np.float64).ravel()
-    rets = rets[np.isfinite(rets)]
-    if rets.size < MIN_OBS_RESAMPLE:
-        return BootstrapResult(0.0, 0.0, 0.0, confidence, 0)
-
-    rng = np.random.default_rng(seed)
-    samples = np.empty(n_resamples, dtype=np.float64)
-    for i in range(n_resamples):
-        draw = rng.choice(rets, size=rets.size, replace=True)
-        samples[i] = sharpe_ratio(draw, periods_per_year=periods_per_year)
-
-    tail = (1.0 - confidence) / 2.0
-    return BootstrapResult(
-        point_estimate=sharpe_ratio(rets, periods_per_year=periods_per_year),
-        lower=float(np.quantile(samples, tail)),
-        upper=float(np.quantile(samples, 1.0 - tail)),
-        confidence=confidence,
-        n_resamples=n_resamples,
-    )
-
-
-def block_bootstrap(
-    returns: npt.ArrayLike,
-    seed: int,
-    block_size: int = 20,
-    n_resamples: int = 2000,
-    periods_per_year: int = 252,
-) -> BootstrapResult:
-    """Bootstrap preserving short-range autocorrelation.
-
-    Resamples contiguous blocks rather than individual observations, so
-    momentum and volatility clustering survive the resampling. The IID
-    bootstrap destroys both and will overstate confidence for any trending
-    strategy.
-    """
-    rets = np.asarray(returns, dtype=np.float64).ravel()
-    rets = rets[np.isfinite(rets)]
-    if rets.size < block_size * 2:
-        return BootstrapResult(0.0, 0.0, 0.0, 0.95, 0)
-
-    rng = np.random.default_rng(seed)
-    n_blocks = int(np.ceil(rets.size / block_size))
-    max_start = rets.size - block_size
-
-    samples = np.empty(n_resamples, dtype=np.float64)
-    for i in range(n_resamples):
-        starts = rng.integers(0, max_start + 1, size=n_blocks)
-        draw = np.concatenate([rets[s : s + block_size] for s in starts])[: rets.size]
-        samples[i] = sharpe_ratio(draw, periods_per_year=periods_per_year)
-
-    return BootstrapResult(
-        point_estimate=sharpe_ratio(rets, periods_per_year=periods_per_year),
-        lower=float(np.quantile(samples, 0.025)),
-        upper=float(np.quantile(samples, 0.975)),
-        confidence=0.95,
-        n_resamples=n_resamples,
-    )
-
-
-def permutation_test(
-    strategy_returns: npt.ArrayLike,
-    benchmark_returns: npt.ArrayLike,
-    seed: int,
-    n_permutations: int = 2000,
-    periods_per_year: int = 252,
-) -> float:
-    """One-sided p-value that the strategy beats the benchmark.
-
-    Pools both series and repeatedly re-splits them at random. If the real
-    difference in Sharpe sits comfortably inside that null distribution, the
-    strategy has not distinguished itself from the benchmark.
-    """
-    strategy = np.asarray(strategy_returns, dtype=np.float64).ravel()
-    benchmark = np.asarray(benchmark_returns, dtype=np.float64).ravel()
-    strategy = strategy[np.isfinite(strategy)]
-    benchmark = benchmark[np.isfinite(benchmark)]
-    if strategy.size < MIN_OBS_RESAMPLE or benchmark.size < MIN_OBS_RESAMPLE:
-        return 1.0
-
-    observed = sharpe_ratio(strategy, periods_per_year=periods_per_year) - sharpe_ratio(
-        benchmark, periods_per_year=periods_per_year
-    )
-
-    pooled = np.concatenate([strategy, benchmark])
-    rng = np.random.default_rng(seed)
-    split = strategy.size
-
-    at_least_as_extreme = 0
-    for _ in range(n_permutations):
-        shuffled = rng.permutation(pooled)
-        difference = sharpe_ratio(
-            shuffled[:split], periods_per_year=periods_per_year
-        ) - sharpe_ratio(shuffled[split:], periods_per_year=periods_per_year)
-        if difference >= observed:
-            at_least_as_extreme += 1
-
-    # +1 in both terms: the observed arrangement is itself one valid draw, and
-    # omitting it can produce an impossible p-value of exactly zero.
-    return (at_least_as_extreme + 1) / (n_permutations + 1)
 
 
 @dataclass(frozen=True)

@@ -256,6 +256,34 @@ class PerformanceStats:
     skewness: float
     kurtosis: float
 
+    def __post_init__(self) -> None:
+        """Coerce numpy scalars to Python ones.
+
+        **These numbers are persisted and served, not only printed.** They go
+        onto `backtest_metrics` and out of the console as JSON, and a
+        `np.float64` here makes `is_implausible` a `np.bool_`, which pydantic
+        refuses to serialise: "Unable to serialize unknown type: <class
+        'numpy.bool'>". The gauntlet rendered fine at the command line for
+        exactly as long as nobody asked for it over HTTP.
+
+        Normalised on construction because every field is computed from numpy
+        arrays and any one of them can arrive wrapped.
+        """
+        for field_name in (
+            "total_return",
+            "cagr",
+            "volatility",
+            "sharpe",
+            "sortino",
+            "max_drawdown",
+            "calmar",
+            "hit_rate",
+            "skewness",
+            "kurtosis",
+        ):
+            object.__setattr__(self, field_name, float(getattr(self, field_name)))
+        object.__setattr__(self, "n_periods", int(self.n_periods))
+
     def format(self) -> str:
         rows = [
             ("periods", f"{self.n_periods}"),
@@ -280,7 +308,7 @@ class PerformanceStats:
         is a bug or a leak until proven otherwise. Flagging it is not the same
         as rejecting it — but it should never pass unremarked.
         """
-        return self.sharpe > IMPLAUSIBLE_SHARPE
+        return bool(self.sharpe > IMPLAUSIBLE_SHARPE)
 
 
 def summarise(

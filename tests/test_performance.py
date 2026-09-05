@@ -24,6 +24,7 @@ from quant.math.metrics.performance import (
     returns_from_equity,
     sharpe_ratio,
     sortino_ratio,
+    summarise,
     volatility,
 )
 
@@ -168,3 +169,31 @@ class TestNonFiniteHandling:
 
     def test_infinities_are_dropped(self):
         assert np.isfinite(sharpe_ratio([0.01, np.inf, -0.01, 0.02]))
+
+
+class TestStatsSurviveSerialisation:
+    """These numbers are persisted and served, not only printed.
+
+    They go onto `backtest_metrics` and out of the console as JSON. A
+    `np.float64` field makes `is_implausible` an `np.bool_`, which pydantic
+    refuses — and the gauntlet rendered fine at the command line for exactly as
+    long as nobody asked for it over HTTP.
+    """
+
+    def test_no_field_is_a_numpy_scalar(self) -> None:
+        stats = summarise(np.random.default_rng(1).normal(0.0006, 0.011, 600), periods_per_year=252)
+        for name in stats.__dataclass_fields__:
+            value = getattr(stats, name)
+            assert type(value).__module__ != "numpy", f"{name} is {type(value)}"
+
+    def test_the_smell_test_returns_a_python_bool(self) -> None:
+        stats = summarise(np.random.default_rng(2).normal(0.002, 0.004, 600), periods_per_year=252)
+        assert type(stats.is_implausible) is bool
+
+    def test_the_whole_summary_round_trips_as_json(self) -> None:
+        import json
+
+        stats = summarise(np.random.default_rng(3).normal(0.0006, 0.011, 600), periods_per_year=252)
+        payload = {name: getattr(stats, name) for name in stats.__dataclass_fields__}
+        payload["is_implausible"] = stats.is_implausible
+        assert json.loads(json.dumps(payload))["sharpe"] == stats.sharpe

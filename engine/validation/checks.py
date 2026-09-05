@@ -31,6 +31,7 @@ from engine.validation.report import (
     GauntletResult,
     array_or_none,
     skipped,
+    too_few,
 )
 from quant.math.metrics.overfitting import (
     deflated_sharpe_ratio,
@@ -213,8 +214,10 @@ def check_cost_sensitivity(inputs: GauntletInputs) -> GauntletResult:
 
 def check_universe_dropout(inputs: GauntletInputs) -> GauntletResult:
     sharpes = array_or_none(inputs.universe_dropout_sharpes)
-    if sharpes is None or sharpes.size < MIN_DROPOUT_SAMPLES:
+    if sharpes is None:
         return skipped("8_universe_dropout", "universe_dropout_sharpes")
+    if sharpes.size < MIN_DROPOUT_SAMPLES:
+        return too_few("8_universe_dropout", sharpes.size, MIN_DROPOUT_SAMPLES, "--dropout-samples")
     percentile = float(np.quantile(sharpes, UNIVERSE_DROPOUT_PERCENTILE))
     return GauntletResult(
         test="8_universe_dropout",
@@ -251,8 +254,10 @@ def check_placebo(inputs: GauntletInputs) -> GauntletResult:
     did the work and the signal contributed nothing.
     """
     placebo = array_or_none(inputs.placebo_sharpes)
-    if placebo is None or placebo.size < MIN_PLACEBO_SAMPLES:
+    if placebo is None:
         return skipped("10_placebo", "placebo_sharpes")
+    if placebo.size < MIN_PLACEBO_SAMPLES:
+        return too_few("10_placebo", placebo.size, MIN_PLACEBO_SAMPLES, "--placebo-samples")
 
     actual = sharpe_ratio(inputs.returns, periods_per_year=inputs.periods_per_year)
     percentile = float(np.mean(placebo < actual))

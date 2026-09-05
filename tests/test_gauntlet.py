@@ -424,3 +424,86 @@ class TestTrialCountProvenance:
             GauntletInputs(returns=self.candidate(1.0), n_trials=1, seed=SEED).trials_verified
             is False
         )
+
+
+class TestVerdictsSurviveSerialisation:
+    """A verdict has to leave this process intact.
+
+    Comparing numpy floats yields `np.bool_`, not `bool`, and a check written
+    the obvious way — `passed=sharpe > 0` — produces one without anything
+    looking wrong. It prints fine and tests fine, and then the console asks for
+    the result as JSON and pydantic refuses. Two of the twelve checks did
+    exactly this, and it only surfaced when the Lab tab tried to render a
+    gauntlet.
+    """
+
+    def test_every_field_is_a_python_scalar(self) -> None:
+        import json
+
+        import numpy as np
+
+        from engine.validation import run_gauntlet
+        from engine.validation.report import GauntletInputs
+
+        rng = np.random.default_rng(3)
+        base = rng.normal(0.0006, 0.011, 600)
+        report = run_gauntlet(
+            GauntletInputs(
+                returns=base,
+                n_trials=16,
+                seed=1,
+                trials_verified=True,
+                shuffled_future_returns=rng.normal(0, 0.011, 600),
+                sweep_returns=np.column_stack([rng.normal(0.0004, 0.011, 600) for _ in range(8)]),
+                in_sample_returns=base[:300],
+                out_of_sample_returns=base[300:],
+                parameter_neighbourhood=rng.normal(0.9, 0.1, 8),
+                tripled_cost_returns=rng.normal(0.0002, 0.011, 600),
+                universe_dropout_sharpes=rng.normal(0.8, 0.2, 30),
+                regime_returns={
+                    "bull": base[:200],
+                    "bear": base[200:400],
+                    "high_vol": base[400:],
+                },
+                placebo_sharpes=rng.normal(0.1, 0.3, 20),
+                trade_returns=base[base != 0],
+                periods_per_year=252,
+            ),
+            short_circuit=False,
+        )
+
+        for result in report.results:
+            for field in ("passed", "skipped", "statistic", "threshold"):
+                value = getattr(result, field)
+                assert value is None or type(value).__module__ != "numpy", (
+                    f"{result.test}.{field} is {type(value)}"
+                )
+
+        # The thing that actually broke: it must round-trip as JSON.
+        json.dumps(
+            [
+                {
+                    "test": r.test,
+                    "passed": r.passed,
+                    "skipped": r.skipped,
+                    "statistic": r.statistic,
+                    "threshold": r.threshold,
+                }
+                for r in report.results
+            ]
+        )
+
+    def test_a_numpy_verdict_is_coerced_on_construction(self) -> None:
+        import numpy as np
+
+        from engine.validation.report import GauntletResult
+
+        result = GauntletResult(
+            test="probe",
+            passed=np.bool_(True),
+            statistic=np.float64(1.5),
+            threshold=np.float64(0.5),
+        )
+        assert type(result.passed) is bool
+        assert type(result.statistic) is float
+        assert type(result.threshold) is float
