@@ -19,8 +19,10 @@ from pydantic import BaseModel
 
 from apps.api.auth import ReadAccess
 from apps.cli.factor import ROUND_TRIP_COST
+from data.feeds.nse_indices import BENCHMARK
 from quant.research.factors import FORWARD_HORIZONS, Factor, FactorSpec, build_factor
 from quant.research.ic import analyse_factor
+from quant.research.market import market_betas
 from quant.research.riskmodel import RiskModel, build_risk_model, decompose
 
 __all__ = ["build_research_router"]
@@ -84,7 +86,12 @@ RISK_FACTORS = (
 
 
 @lru_cache(maxsize=4)
-def _cached_risk_model(sessions: int, fingerprint: tuple[int, str]) -> RiskModel | None:
+def _cached_risk_model(
+    sessions: int,
+    fingerprint: tuple[int, str],
+    index_fingerprint: tuple[int, str],
+    benchmark_name: str,
+) -> RiskModel | None:
     """The risk model for one window, held until the lake changes.
 
     **Estimating it costs minutes**, not milliseconds: it is one cross-sectional
@@ -92,11 +99,17 @@ def _cached_risk_model(sessions: int, fingerprint: tuple[int, str]) -> RiskModel
     that per request would time out — which it did, the first time this was
     served uncached. Keyed on the lake's fingerprint for the same reason the
     panel is, so an ingest invalidates it rather than a restart being required.
-    """
-    from apps.api.analytics import _panel  # noqa: PLC0415 - shares the cached panel
 
-    del fingerprint  # cache identity only
-    return build_risk_model(_panel(), RISK_FACTORS, window=sessions)
+    Keyed on the *index* lake too, so backfilling the benchmark promotes the
+    market factor from an equal-weight proxy to a real beta without a restart.
+    """
+    from apps.api.analytics import _panel, benchmark  # noqa: PLC0415 - shares the cached panel
+
+    del fingerprint, index_fingerprint  # cache identity only
+    panel = _panel()
+    index = benchmark(benchmark_name)
+    betas = market_betas(panel, index) if not index.is_empty() else None
+    return build_risk_model(panel, RISK_FACTORS, window=sessions, betas=betas)
 
 
 class RiskContribution(BaseModel):
@@ -123,6 +136,15 @@ class RiskResponse(BaseModel):
     #: is unstable even though the total is sound.
     ill_conditioned: bool = False
     condition: float = 0.0
+    #: What the market factor actually was: "index" (each name's trailing beta
+    #: to the benchmark) or "equal_weight" (a column of ones, whose slope is the
+    #: equal-weighted average return of every name that traded). A beta is only
+    #: as meaningful as the market it was measured against.
+    market_source: str = "equal_weight"
+    #: The index beta was measured against, when one was. Named because a beta
+    #: is only as meaningful as the market it was measured against, and with a
+    #: selectable benchmark "index" alone no longer says which.
+    benchmark: str = ""
     note: str = ""
 
 
@@ -131,8 +153,20 @@ class FactorListRow(BaseModel):
     description: str
 
 
-def build_research_router() -> APIRouter:
-    router = APIRouter(tags=["research"])
+def _register_catalogue(router: APIRouter) -> None:
+    """What can be measured, and against what."""
+
+    @router.get("/benchmarks", dependencies=[ReadAccess])
+    def benchmarks() -> list[str]:
+        """Indices the risk model can measure beta against.
+
+        NSE publishes 165 of them in one file and the feed stores all of them,
+        so a sector book can be measured against its sector rather than against
+        the broad market it does not actually track.
+        """
+        from apps.api.analytics import benchmark_names  # noqa: PLC0415
+
+        return benchmark_names()
 
     @router.get("/factors", dependencies=[ReadAccess])
     def factors() -> list[FactorListRow]:
@@ -140,8 +174,15 @@ def build_research_router() -> APIRouter:
         field would let a typo become a discovery."""
         return [FactorListRow(name=f.value, description=f.description) for f in Factor]
 
+
+def _register_studies(router: APIRouter) -> None:
+    """The measurements themselves."""
+
     @router.get("/risk/model", response_model=RiskResponse, dependencies=[ReadAccess])
-    def risk_model(sessions: int = Query(756, ge=252, le=2520)) -> RiskResponse:
+    def risk_model(
+        sessions: int = Query(756, ge=252, le=2520),
+        benchmark: str = Query(BENCHMARK, max_length=64),
+    ) -> RiskResponse:
         """Decompose the paper book into factor and specific risk.
 
         The question no screen could answer: the library scores signals one at
@@ -150,7 +191,11 @@ def build_research_router() -> APIRouter:
         two thirds of it turns out to be the market, which reframes what the
         factor work is actually moving.
         """
-        from apps.api.analytics import DEFAULT_VENUE, _lake_fingerprint  # noqa: PLC0415
+        from apps.api.analytics import (  # noqa: PLC0415
+            DEFAULT_VENUE,
+            _index_fingerprint,
+            _lake_fingerprint,
+        )
         from apps.api.book import DEFAULT_STATE_DIR, _latest_marks  # noqa: PLC0415
         from trading.paper.state import PaperStateStore, StateCorruptError  # noqa: PLC0415
 
@@ -171,7 +216,9 @@ def build_research_router() -> APIRouter:
         if not values:
             return RiskResponse(present=False, note="The book holds nothing.")
 
-        model = _cached_risk_model(sessions, _lake_fingerprint(DEFAULT_VENUE))
+        model = _cached_risk_model(
+            sessions, _lake_fingerprint(DEFAULT_VENUE), _index_fingerprint(), benchmark
+        )
         if model is None:
             return RiskResponse(
                 present=False,
@@ -201,6 +248,8 @@ def build_research_router() -> APIRouter:
             names=len(values),
             ill_conditioned=model.is_ill_conditioned,
             condition=model.condition,
+            market_source=model.market_source,
+            benchmark=benchmark if model.market_source == "index" else "",
         )
 
     @router.get("/factor/{name}", response_model=FactorResponse, dependencies=[ReadAccess])
@@ -268,4 +317,9 @@ def build_research_router() -> APIRouter:
             tail_driven=report.is_tail_driven,
         )
 
+
+def build_research_router() -> APIRouter:
+    router = APIRouter(tags=["research"])
+    _register_catalogue(router)
+    _register_studies(router)
     return router

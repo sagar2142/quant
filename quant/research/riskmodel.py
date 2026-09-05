@@ -101,6 +101,13 @@ class RiskModel:
     #: Latest exposure per instrument per factor, shape (names, factors).
     exposures: dict[str, FloatArray]
     sessions: int
+    #: What the market column actually was. ``"index"`` means each name's
+    #: trailing beta to a real benchmark; ``"equal_weight"`` means a column of
+    #: ones, whose slope is the equal-weighted cross-sectional average return —
+    #: a proxy, and a smallcap-heavy one on a two-thousand-name panel. Recorded
+    #: because a beta is only as meaningful as the market it was measured
+    #: against, and a reader deserves to know which they are looking at.
+    market_source: str = "equal_weight"
     #: Condition number of the factor covariance. High means the factors are
     #: close to collinear and the *individual* attributions below are poorly
     #: identified even though the total is sound — the regression can trade one
@@ -134,9 +141,15 @@ class RiskModel:
         }
 
     def format(self) -> str:
+        market = (
+            "beta to the benchmark index"
+            if self.market_source == "index"
+            else "a column of ones (no index in the lake — equal-weight proxy)"
+        )
         lines = [
             f"  {len(self.factors)} factors over {self.sessions:,} sessions,"
             f" {len(self.specific_variance):,} names",
+            f"  market exposure: {market}",
             "",
             "  FACTOR VOLATILITY (annualised)",
         ]
@@ -190,7 +203,10 @@ class RiskDecomposition:
 
 
 def _exposure_frame(
-    history: pl.DataFrame, factors: tuple[Factor, ...], window: int
+    history: pl.DataFrame,
+    factors: tuple[Factor, ...],
+    window: int,
+    betas: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """One column per factor, cross-sectionally standardised each session.
 
@@ -198,6 +214,11 @@ def _exposure_frame(
     dispersion: momentum measured in return units and volatility measured in
     standard deviations would produce slopes that are not comparable, and the
     covariance of those slopes would be meaningless.
+
+    The market column is the exception: when `betas` is supplied it carries each
+    name's trailing beta to the benchmark, raw. Standardising it would force it
+    to sum to zero across the universe, which is precisely the failure the beta
+    is there to remove.
     """
     frames: list[pl.DataFrame] = []
     for factor in factors:
@@ -219,10 +240,26 @@ def _exposure_frame(
     joined = frames[0]
     for frame in frames[1:]:
         joined = joined.join(frame.drop("_fwd"), on=["event_time", "instrument_id"], how="inner")
-    # A column of ones, so the regression carries an intercept whose slope is
-    # the session's average return. Named rather than implicit: it appears in
-    # the decomposition alongside the styles, which is where a long-only book's
-    # risk actually lives.
+
+    if betas is not None and not betas.is_empty():
+        # Inner join: a name with no estimable beta yet leaves the regression
+        # for those sessions rather than being handed a fabricated exposure of
+        # one. Newly listed names simply are not yet measurable.
+        return (
+            joined.join(
+                betas.select("event_time", "instrument_id", pl.col("beta").alias(MARKET)),
+                on=["event_time", "instrument_id"],
+                how="inner",
+            )
+            .drop_nulls()
+            .sort(["event_time", "instrument_id"])
+        )
+
+    # Fallback with no index in the lake: a column of ones, so the regression
+    # carries an intercept whose slope is the session's *equal-weighted*
+    # average return. Named rather than implicit — it appears in the
+    # decomposition alongside the styles, which is where a long-only book's
+    # risk actually lives — but `market_source` records that this is a proxy.
     return joined.drop_nulls().with_columns(pl.lit(1.0).alias(MARKET))
 
 
@@ -230,8 +267,18 @@ def build_risk_model(
     history: pl.DataFrame,
     factors: tuple[Factor, ...],
     window: int = 0,
+    betas: pl.DataFrame | None = None,
 ) -> RiskModel | None:
     """Estimate factor returns, their covariance, and specific risk.
+
+    Args:
+        history: The cross-sectional panel.
+        factors: Style factors to estimate alongside the market.
+        window: Lookback passed to each factor's construction.
+        betas: Optional `event_time`, `instrument_id`, `beta` frame from
+            `quant.research.market.market_betas`. When given, the market column
+            is a real exposure to a real index. When omitted, it falls back to a
+            column of ones and says so in `market_source`.
 
     Returns:
         None when the panel cannot support the estimate — too few sessions with
@@ -240,7 +287,7 @@ def build_risk_model(
         from forty sessions would be reported with the same confidence as one
         from a thousand, and nothing downstream could tell them apart.
     """
-    frame = _exposure_frame(history, factors, window)
+    frame = _exposure_frame(history, factors, window, betas)
     if frame.is_empty():
         return None
 
@@ -300,6 +347,7 @@ def build_risk_model(
         # diversified set as ill-conditioned and trains the reader to
         # ignore the warning.
         condition=float(condition_number(correlation_from_covariance(covariance))),
+        market_source="index" if betas is not None and not betas.is_empty() else "equal_weight",
         factors=present,
         factor_returns=factor_returns,
         covariance=covariance,

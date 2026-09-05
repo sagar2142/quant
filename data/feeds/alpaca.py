@@ -29,7 +29,7 @@ from typing import cast
 import httpx
 import polars as pl
 
-from core.clock import UTC, require_utc, utc_now
+from core.clock import require_utc, utc_now
 from core.events import Timeframe
 from data.store.bars import BAR_SCHEMA
 
@@ -232,8 +232,3 @@ class AlpacaBarLoader:
             .sort("event_time")
             .select(list(BAR_SCHEMA.keys()))
         )
-
-
-def default_start() -> datetime:
-    """Sensible backfill origin. Alpaca's free IEX history begins in 2016."""
-    return datetime(2016, 1, 1, tzinfo=UTC)

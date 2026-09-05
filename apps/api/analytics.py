@@ -34,13 +34,15 @@ from apps.api.schemas import (
 from apps.cli.terminal import aligned_returns, load_actions, series_for
 from core.clock import as_decision_time, utc_now
 from core.config import settings
+from data.feeds.nse_indices import BENCHMARK
 from data.store.bars import NoDataError
+from data.store.indices import IndexStore
 from data.store.panel import PanelStore
 from quant.analytics.crosssection import analyse_cross_section
 from quant.analytics.screener import ScreenCriteria, SortKey, screen_universe
 from quant.analytics.security import profile_security
 
-__all__ = ["build_analytics_router", "latest_quote"]
+__all__ = ["benchmark", "benchmark_names", "build_analytics_router", "latest_quote"]
 
 #: Cap on symbols per cross-section request. The correlation work is O(n^2) and
 #: a browser cannot read a 200-name matrix anyway.
@@ -106,6 +108,49 @@ def _lake_fingerprint(venue: str = DEFAULT_VENUE) -> tuple[int, str]:
     except OSError:
         return (0, "")
     return (len(sessions), sessions[-1].isoformat() if sessions else "")
+
+
+@lru_cache(maxsize=2)
+def _read_benchmark(fingerprint: tuple[int, str], name: str) -> pl.DataFrame:
+    """One index's whole history. Keyed on the index lake's own state."""
+    del fingerprint  # cache identity only
+    try:
+        return IndexStore(settings.lake).series(name, as_of=as_decision_time(utc_now()))
+    except NoDataError:
+        return pl.DataFrame()
+
+
+def _index_fingerprint() -> tuple[int, str]:
+    """Sessions of index data held and the newest, as a cache key."""
+    try:
+        sessions = IndexStore(settings.lake).sessions()
+    except OSError:
+        return (0, "")
+    return (len(sessions), sessions[-1].isoformat() if sessions else "")
+
+
+def benchmark_names() -> list[str]:
+    """Every index the lake holds, from the newest observable session.
+
+    The feed stores all 165 indices NSE publishes because the file contains
+    them all; without this only the default benchmark was reachable and the
+    rest were ingested decoration.
+    """
+    try:
+        return IndexStore(settings.lake).names(as_of=as_decision_time(utc_now()))
+    except (NoDataError, OSError):
+        return []
+
+
+def benchmark(name: str = BENCHMARK) -> pl.DataFrame:
+    """The benchmark index series, empty if it has not been ingested.
+
+    Empty rather than raising: the console must still render a risk model with
+    the equal-weight market proxy on a lake that has no index in it yet. What
+    it must not do is claim the proxy is the index, which is why the model
+    carries `market_source`.
+    """
+    return _read_benchmark(_index_fingerprint(), name)
 
 
 def _panel(venue: str = DEFAULT_VENUE) -> pl.DataFrame:
