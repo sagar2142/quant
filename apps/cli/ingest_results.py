@@ -109,7 +109,11 @@ def fetch_xbrl(
 
     # Not a scheme check: NSE writes the filename as a dash when nothing was
     # filed, so `.../xbrl/-` is a well-formed URL on the right host that 404s.
-    with_url = filings.filter(xbrl_document_expr())
+    # Unique on the URL before anything else. Two filings pointing at one
+    # document would otherwise be fetched twice and, worse, fan out the join
+    # below into duplicate filings carrying each other's numbers. Not seen in
+    # 18,207 real filings, and cheap to make impossible.
+    with_url = filings.filter(xbrl_document_expr()).unique(subset=["xbrl_url"], keep="first")
     ordered = with_url.sort("receive_time", descending=True)
     if limit > 0:
         ordered = ordered.head(limit)

@@ -251,6 +251,14 @@ class GrowwBroker:
                 f"{self.remaining_budget}; a new budget requires a new process"
             )
 
+        # The one float cast on a money value in this module, and it sits at the
+        # JSON boundary where a Decimal cannot go. Lossless for the prices that
+        # exist: json.dumps emits repr(float), the shortest string that
+        # round-trips, so 2400.05 reaches the broker as "2400.05". Verified
+        # across paise-precision INR prices — none altered. The value is Decimal
+        # everywhere up to this line.
+        wire_price = float(order.limit_price) if order.limit_price else 0  # lint: allow-money-float
+
         payload: dict[str, object] = {
             "trading_symbol": self._symbol_for(order.instrument_id),
             "quantity": int(order.quantity),
@@ -262,7 +270,7 @@ class GrowwBroker:
             "transaction_type": _SIDES[order.side],
             # Groww wants a price field even for a market order, where it is
             # ignored. Sent as 0 rather than omitted, which the API rejects.
-            "price": float(order.limit_price) if order.limit_price else 0,
+            "price": wire_price,
         }
 
         body = self._call("POST", "/order/create", json=payload)
@@ -314,7 +322,7 @@ class GrowwBroker:
             for row in rows
         ]
 
-    def candles(
+    def candles(  # lint: allow-money-float
         self,
         trading_symbol: str,
         start: str,
@@ -353,7 +361,10 @@ class GrowwBroker:
         if not isinstance(rows, list):
             return []
 
-        out: list[tuple[int, float, float, float, float, float]] = []
+        # Historical OHLCV is a statistic, not a settled amount — §14.1.2 puts
+        # float64 here deliberately. Nothing in this list is ever paid or
+        # reconciled; it feeds charts and indicators.
+        out: list[tuple[int, float, float, float, float, float]] = []  # lint: allow-money-float
         for row in rows:
             # Each candle is a six-element array. A row of another shape is
             # skipped rather than padded: a candle with an invented close is
@@ -364,11 +375,11 @@ class GrowwBroker:
                 out.append(
                     (
                         int(row[0]),
-                        float(row[1]),
-                        float(row[2]),
-                        float(row[3]),
-                        float(row[4]),
-                        float(row[5]),
+                        float(row[1]),  # lint: allow-money-float
+                        float(row[2]),  # lint: allow-money-float
+                        float(row[3]),  # lint: allow-money-float
+                        float(row[4]),  # lint: allow-money-float
+                        float(row[5]),  # lint: allow-money-float
                     )
                 )
             except (TypeError, ValueError):

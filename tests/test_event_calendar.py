@@ -187,6 +187,10 @@ class TestReportsRule:
             "as_of": datetime(2026, 9, 5, tzinfo=UTC),
             "days_to_results": {"RELIANCE": 2},
             "days_to_results_known": True,
+            # The calendar was read far enough to answer a 3-day rule. Without
+            # this the rule is unevaluable rather than quiet, which is correct
+            # and is what `TestHorizonIsNotSilentlyCapped` covers.
+            "results_horizon_days": 30,
         }
         return WatchContext(**{**base, **kw})
 
@@ -228,3 +232,82 @@ class TestReportsRule:
         from ops.watch import _EVALUATORS
 
         assert set(_EVALUATORS) == set(RuleKind)
+
+
+class TestHorizonIsNotSilentlyCapped:
+    """A rule asking further ahead than the calendar was read.
+
+    The tempting answer — "no meeting announced" — is a measurement nobody
+    took, and it is the same false quiet an unreadable calendar produces,
+    reached from the other direction.
+    """
+
+    def rule(self, threshold: int):
+        from decimal import Decimal
+
+        return Rule(
+            rule_id="far",
+            kind=RuleKind.REPORTS_WITHIN_DAYS,
+            subject="FARCO",
+            threshold=Decimal(threshold),
+        )
+
+    def context(self, horizon: int):
+        from datetime import datetime
+
+        return WatchContext(
+            as_of=datetime(2026, 9, 5, tzinfo=UTC),
+            days_to_results={},
+            days_to_results_known=True,
+            results_horizon_days=horizon,
+        )
+
+    def test_a_rule_beyond_the_horizon_is_unevaluable(self) -> None:
+        found = evaluate([self.rule(60)], self.context(30))
+        assert not found[0].evaluable
+        assert "read only 30 days ahead" in found[0].reason
+
+    def test_a_rule_inside_the_horizon_is_answered(self) -> None:
+        found = evaluate([self.rule(10)], self.context(30))
+        assert found[0].evaluable
+        assert not found[0].fired
+
+    def test_the_boundary_is_inclusive(self) -> None:
+        assert evaluate([self.rule(30)], self.context(30))[0].evaluable
+
+    def test_a_zero_horizon_answers_nothing(self) -> None:
+        """No calendar was read, so no calendar rule is quiet."""
+        assert not evaluate([self.rule(3)], self.context(0))[0].evaluable
+
+    def test_the_runner_reads_far_enough_for_its_rules(self) -> None:
+        from apps.cli.watch import results_horizon
+
+        assert results_horizon([self.rule(3), self.rule(12)]) == 12
+
+    def test_it_never_asks_beyond_the_cap(self) -> None:
+        from apps.cli.watch import MAX_RESULTS_HORIZON, results_horizon
+
+        assert results_horizon([self.rule(999)]) == MAX_RESULTS_HORIZON
+
+    def test_no_calendar_rules_means_no_calendar_read(self) -> None:
+        """Reading a calendar nothing asks about is a wasted fetch."""
+        from decimal import Decimal
+
+        from apps.cli.watch import results_horizon
+
+        other = Rule(rule_id="d", kind=RuleKind.DRAWDOWN_BEYOND, threshold=Decimal("-0.05"))
+        assert results_horizon([other]) == 0
+
+    def test_a_disabled_rule_does_not_widen_the_horizon(self) -> None:
+        from decimal import Decimal
+
+        from apps.cli.watch import results_horizon
+
+        off = Rule(
+            rule_id="off",
+            kind=RuleKind.REPORTS_WITHIN_DAYS,
+            subject="X",
+            threshold=Decimal(25),
+            enabled=False,
+        )
+        assert results_horizon([off, self.rule(4)]) == 4

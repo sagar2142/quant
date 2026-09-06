@@ -193,7 +193,10 @@ def sector_breakdown(top: int = 100, venue: str = DEFAULT_VENUE) -> SectorRespon
 
     from data.store.sectors import SectorStore  # noqa: PLC0415
 
-    view = SectorStore(settings.lake).view()
+    # Present-tense by design: this screen describes the universe as it stands
+    # now, so the newest classification is the right one. A dated read here
+    # would be answering a question nobody asked.
+    view = SectorStore(settings.lake).view()  # lint: allow-unbounded-read
     if not view.industries:
         return SectorResponse(
             observed_at=None,

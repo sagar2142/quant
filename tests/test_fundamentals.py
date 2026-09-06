@@ -427,3 +427,31 @@ class TestMergePreservesNumbers:
         store = FundamentalStore(tmp_path)
         store.write(self.with_revenue(2191000000.0))
         assert store.write(self.with_revenue(None)) == 1
+
+
+class TestProvenanceIsARecord:
+    def test_facts_come_from_exactly_one_context(self) -> None:
+        """Measured on 25 real filings, every document has one usable context.
+        Taking facts from two while reporting one would make `context` a claim
+        rather than a record."""
+        two = b"""<?xml version="1.0"?>
+<xbrl>
+  <context id="OneA"><period><startDate>2024-10-01</startDate><endDate>2024-12-31</endDate></period></context>
+  <context id="OneB"><period><startDate>2024-10-01</startDate><endDate>2024-12-31</endDate></period></context>
+  <RevenueFromOperations contextRef="OneA">100</RevenueFromOperations>
+  <ProfitBeforeTax contextRef="OneB">999</ProfitBeforeTax>
+</xbrl>"""
+        facts = parse_xbrl(two)
+        assert facts.context == "OneA"
+        assert facts.values == {"revenue": Decimal("100")}
+
+
+class TestNullPeriodIsRefusedByName:
+    def test_a_filing_with_no_period_is_refused(self, tmp_path) -> None:
+        """Partitioning is by period year, so a null period has nowhere to
+        live. It should say so, not surface as int(None) in a group-by."""
+        frame = parse_filings(payload(FILING)).with_columns(
+            pl.lit(None, dtype=pl.Date).alias("period_end")
+        )
+        with pytest.raises(ValueError, match="no period_end"):
+            FundamentalStore(tmp_path).write(frame)

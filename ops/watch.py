@@ -133,6 +133,12 @@ class WatchContext:
     #: calendar would look exactly like a quiet one, and a rule that silently
     #: never fires is the failure this module exists to prevent.
     days_to_results_known: bool = False
+    #: How many days ahead `days_to_results` was actually read.
+    #:
+    #: A rule asking further ahead than this was not answered, and saying "no
+    #: meeting announced" would be a measurement the caller never made. The
+    #: horizon has to travel with the data for the rule to know the difference.
+    results_horizon_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -258,6 +264,16 @@ def _results_rule(rule: Rule, context: WatchContext) -> Trigger:
     """
     if not context.days_to_results_known:
         return unevaluable(rule, "no calendar to read announced meetings from")
+    if rule.threshold > context.results_horizon_days:
+        # Asking further ahead than the calendar was read. Answering "nothing
+        # announced" here would report a measurement nobody took — the same
+        # false quiet an unreadable calendar would produce, arrived at from the
+        # other direction.
+        return unevaluable(
+            rule,
+            f"calendar read only {context.results_horizon_days} days ahead, "
+            f"rule asks {rule.threshold}",
+        )
     days = context.days_to_results.get(rule.subject) or context.days_to_results.get(
         rule.subject.upper()
     )

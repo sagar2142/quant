@@ -145,6 +145,14 @@ class FundamentalStore:
         missing = [c for c in FILING_SCHEMA if c not in frame.columns]
         if missing:
             raise ValueError(f"filing frame is missing columns {missing}")
+        if not frame.is_empty() and frame["period_end"].null_count():
+            # Partitioning is by period year, so a null period has nowhere to
+            # live. Refused by name rather than surfacing as an int(None) deep
+            # inside the group-by.
+            raise ValueError(
+                f"{frame['period_end'].null_count()} filing(s) have no period_end; "
+                "a filing with no period cannot be stored or read point-in-time"
+            )
 
         prepared = frame
         for column, dtype in FUNDAMENTAL_SCHEMA.items():

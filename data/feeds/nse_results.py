@@ -49,6 +49,7 @@ propagate into every factor built on it.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -72,6 +73,8 @@ __all__ = [
     "xbrl_document_expr",
     "xbrl_is_plausible",
 ]
+
+logger = logging.getLogger(__name__)
 
 _BASE = "https://www.nseindia.com/api/corporates-financial-results"
 
@@ -337,6 +340,7 @@ def parse_xbrl(payload: bytes) -> XbrlFacts:
     usable = _statement_contexts(root)
     values: dict[str, Decimal] = {}
     contexts: set[str] = set()
+    skipped: set[str] = set()
     chosen = ""
 
     for element in root.iter():
@@ -346,6 +350,13 @@ def parse_xbrl(payload: bytes) -> XbrlFacts:
         context = str(element.get("contextRef") or "")
         contexts.add(context)
         if context not in usable:
+            continue
+        # Pinned to the first usable context that yields a fact. Measured on 25
+        # real filings, every document has exactly one, so this costs nothing —
+        # but taking facts from two while reporting one context would make the
+        # provenance a claim rather than a record.
+        if chosen and context != chosen:
+            skipped.add(context)
             continue
         value = _to_decimal(element.text or "")
         if value is None:
@@ -361,6 +372,15 @@ def parse_xbrl(payload: bytes) -> XbrlFacts:
                 f"figures ({', '.join(cumulative)}), which are not this quarter's"
             )
         raise ResultsFormatError("document carries none of the expected facts")
+    if skipped:
+        # Never seen in real filings. If it starts happening the taxonomy has
+        # changed shape and the selection needs revisiting, so it is loud.
+        logger.warning(
+            "%s usable contexts in one document; kept %s, ignored %s",
+            len(skipped) + 1,
+            chosen,
+            ", ".join(sorted(skipped)),
+        )
     return XbrlFacts(values=values, context=chosen)
 
 

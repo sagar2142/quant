@@ -307,7 +307,7 @@ def sector_exposure(
     """
     from data.store.sectors import SectorStore  # noqa: PLC0415 - optional at import
 
-    view = SectorStore(settings.lake).view()
+    view = SectorStore(settings.lake).view()  # lint: allow-unbounded-read
     groups: dict[str, Decimal] = {}
     for instrument_id, notional in positions.items():
         found = view.industry_of(str(instrument_id))
@@ -320,7 +320,9 @@ def _cluster_for(instrument_id: InstrumentId) -> str:
     """The group a hand-entered order belongs to."""
     from data.store.sectors import SectorStore  # noqa: PLC0415
 
-    found = SectorStore(settings.lake).view().industry_of(str(instrument_id))
+    # A hand-entered order is being placed now, against today's labels.
+    view = SectorStore(settings.lake).view()  # lint: allow-unbounded-read
+    found = view.industry_of(str(instrument_id))
     return f"{INDUSTRY_PREFIX}{found}" if found else UNCLASSIFIED
 
 

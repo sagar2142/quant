@@ -43,7 +43,7 @@ from ops.alerts import Alert, AlertRouter, Severity
 from ops.routing import build_router, describe_channels
 from ops.watch import Rule, RuleKind, Trigger, WatchContext, evaluate
 
-__all__ = ["assemble_context", "load_rules", "run"]
+__all__ = ["assemble_context", "load_rules", "results_horizon", "run"]
 
 RULES_FILE = "rules.json"
 STATE_FILE = "state.json"
@@ -167,8 +167,30 @@ def _write_state(path: Path, state: dict[str, bool]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def assemble_context(lake: Path, venue: str = "NSE") -> WatchContext:
+def results_horizon(rules: list[Rule]) -> int:
+    """How far ahead the calendar must be read to answer these rules.
+
+    Driven by the rules rather than fixed, because a horizon shorter than a
+    rule's threshold cannot answer it — and the tempting answer, "nothing
+    announced", is a measurement nobody took.
+    """
+    wanted = [
+        int(rule.threshold)
+        for rule in rules
+        if rule.enabled and rule.kind is RuleKind.REPORTS_WITHIN_DAYS
+    ]
+    return min(max(wanted, default=0), MAX_RESULTS_HORIZON)
+
+
+def assemble_context(lake: Path, venue: str = "NSE", horizon: int = 0) -> WatchContext:
     """Gather everything the rules are evaluated against.
+
+    Args:
+        lake: Where the stores live.
+        venue: Exchange whose panel supplies the closes.
+        horizon: Days ahead to read the results calendar. `results_horizon`
+            derives it from the rules; zero reads no calendar at all, which
+            leaves every calendar rule unevaluable rather than quiet.
 
     Kept here rather than in `ops.watch` so the evaluation stays a pure
     function of its inputs and can be tested without a lake, a broker or a
@@ -225,7 +247,7 @@ def assemble_context(lake: Path, venue: str = "NSE") -> WatchContext:
     except Exception:  # noqa: BLE001 - no book is a state, not a failure
         drawdown = None
 
-    days_to_results, calendar_known = _announced_results(lake, now.date())
+    days_to_results, calendar_known = _announced_results(lake, now.date(), horizon)
 
     return WatchContext(
         as_of=now,
@@ -235,10 +257,11 @@ def assemble_context(lake: Path, venue: str = "NSE") -> WatchContext:
         feed_age_hours=feed_ages,
         days_to_results=days_to_results,
         days_to_results_known=calendar_known,
+        results_horizon_days=horizon if calendar_known else 0,
     )
 
 
-def _announced_results(lake: Path, today: date) -> tuple[dict[str, int], bool]:
+def _announced_results(lake: Path, today: date, horizon: int) -> tuple[dict[str, int], bool]:
     """Days until each name's announced results meeting, and whether we know.
 
     The second half of the pair is what stops an unread calendar from looking
@@ -246,9 +269,11 @@ def _announced_results(lake: Path, today: date) -> tuple[dict[str, int], bool]:
     a fortnight ago has no useful opinion about the coming week, and reporting
     "nothing announced" from it would be a false all-clear.
     """
+    if horizon <= 0:
+        return {}, False
     from data.store.events import EventStore  # noqa: PLC0415 - only when asked
 
-    window = EventStore(lake).upcoming(today, within_days=MAX_RESULTS_HORIZON, results_only=True)
+    window = EventStore(lake).upcoming(today, within_days=horizon, results_only=True)
     if window.observed_at is None or window.age_days > STALE_CALENDAR_DAYS:
         return {}, False
 
@@ -341,7 +366,7 @@ def run(argv: list[str] | None = None) -> int:
         print("Write a starter set with: python -m apps.cli.watch --example")
         return 0
 
-    context = assemble_context(paths.root, args.venue)
+    context = assemble_context(paths.root, args.venue, results_horizon(rules))
     triggers = evaluate(rules, context)
     state = _read_state(paths.state)
     router = build_router()
