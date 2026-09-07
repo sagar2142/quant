@@ -153,6 +153,27 @@ by writing code:
 - **M11** wants human attestations — legal advice, tax position, tested kill
   switch. Run `python -m apps.cli.readiness` to see the list.
 
+### Running the console
+
+```powershell
+.\dev.ps1               # API on :8000 and console on :5173, both reloading
+.\dev.ps1 -ApiOnly      # API alone, for endpoint or CLI work
+.\dev.ps1 -Port 8010    # when something else already holds 8000
+```
+
+Both halves reload on save: uvicorn restarts the API when a source package
+changes, and Vite hot-reloads the console. The watch list is the source
+packages only — `lake/` holds thousands of Parquet files that an evening ingest
+rewrites, and watching it would restart the API mid-request.
+
+The script resolves the port once and hands the same number to both processes.
+Getting that wrong is the failure worth avoiding: the console loads normally
+and every screen is empty, because its proxy is pointing at a port with nothing
+behind it — which reads as a data problem rather than a configuration one. It
+also refuses to start when the port is already held, and names the process
+holding it, since a stale server from an earlier session presents as edits that
+appear to do nothing.
+
 ### Console API authentication
 
 The API is unauthenticated on loopback for *reads* and refuses *mutations*
