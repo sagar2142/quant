@@ -157,8 +157,35 @@ class PaperStateStore:
 
     # ── equity log ──────────────────────────────────────────────────────────
 
-    def append_equity(self, session: date, equity: Decimal, cash: Decimal, fees: Decimal) -> None:
-        """One NDJSON line per cycle. This is what drift analysis reads (§35)."""
+    def append_equity(  # noqa: PLR0913, PLR0917 - a cycle row is its fields
+        self,
+        session: date,
+        equity: Decimal,
+        cash: Decimal,
+        fees: Decimal,
+        *,
+        strategy: str = "",
+        parameters: dict[str, object] | None = None,
+    ) -> None:
+        """One NDJSON line per cycle. This is what drift analysis reads (§35).
+
+        Args:
+            session: The session traded.
+            equity: Closing equity for the cycle.
+            cash: Uninvested cash.
+            fees: Cumulative fees paid.
+            strategy: The strategy's name, and `parameters` its full spec.
+
+        **The spec is written with every row, not assumed.** Drift compares this
+        curve against a backtest of the same strategy over the same sessions,
+        which is only a comparison if the parameters match. Recording only the
+        equity would leave a later reader reconstructing them from whatever the
+        defaults happen to be that day — and a drift number computed against the
+        wrong lookback is not a small error, it is a different strategy.
+
+        A row that changes parameters mid-run is also the thing worth seeing:
+        the curve either side of it is two experiments, not one.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
             {
@@ -167,6 +194,8 @@ class PaperStateStore:
                 "equity": str(equity),
                 "cash": str(cash),
                 "fees_paid": str(fees),
+                "strategy": strategy,
+                "parameters": parameters or {},
             }
         )
         with self.log_path.open("a", encoding="utf-8") as handle:
@@ -261,9 +290,7 @@ def _encode_state(state: PaperState) -> dict[str, object]:
     }
 
 
-def _entries(
-    raw: dict[str, object], key: str, *, required: bool = True
-) -> list[dict[str, object]]:
+def _entries(raw: dict[str, object], key: str, *, required: bool = True) -> list[dict[str, object]]:
     """A list-of-objects field, or a loud TypeError feeding StateCorruptError.
 
     Args:

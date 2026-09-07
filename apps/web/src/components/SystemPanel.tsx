@@ -23,6 +23,19 @@ interface Venue {
   last: string | null;
 }
 
+interface PaperStatus {
+  started: boolean;
+  cycles: number;
+  first_session: string | null;
+  last_session: string | null;
+  days_since_last: number | null;
+  halted: boolean;
+  halt_reason: string;
+  sessions_required: number;
+  strategies: string[];
+  drift_reason: string;
+}
+
 interface Gate {
   name: string;
   ready: boolean;
@@ -61,6 +74,7 @@ export function SystemPanel() {
   const [limits, setLimits] = useState<LimitRow[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
   const [options, setOptions] = useState<number | null>(null);
+  const [paper, setPaper] = useState<PaperStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
@@ -71,13 +85,15 @@ export function SystemPanel() {
       fetch("/api/risk/limits").then((r) => (r.ok ? r.json() : [])),
       fetch("/api/health").then((r) => (r.ok ? r.json() : null)),
       fetch("/api/options/underlyings").then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/paper/status").then((r) => (r.ok ? r.json() : null)),
     ])
-      .then(([v, t, l, h, o]) => {
+      .then(([v, t, l, h, o, p]) => {
         setVenues(Array.isArray(v) ? v : []);
         setTrade(t);
         setLimits(Array.isArray(l) ? l : (l?.limits ?? []));
         setHealth(h);
         setOptions(Array.isArray(o) ? o.length : null);
+        setPaper(p);
       })
       .catch(() => undefined)
       .finally(() => setBusy(false));
@@ -159,6 +175,76 @@ export function SystemPanel() {
               )}
             </tbody>
           </table>
+        </article>
+
+        <article className="block">
+          <header className="panel-header">
+            Paper cycle
+            {paper && (
+              <span className={paper.started ? "badge live" : "badge blocked"}>
+                {paper.halted ? "HALTED" : paper.started ? "RUNNING" : "NOT STARTED"}
+              </span>
+            )}
+          </header>
+          {paper ? (
+            <>
+              {/* Not-started is a state, not an empty screen. Showing zeros here
+                  would read as "ran and did nothing", which is the opposite of
+                  what a stalled scheduler means. */}
+              {!paper.started ? (
+                <p className="empty">
+                  No cycle has ever written state. The M9 clock has not started — the
+                  scheduled workflow runs from the default branch, so it only fires once
+                  this is merged there.
+                </p>
+              ) : (
+                <dl className="stats">
+                  <div className="stat">
+                    <dt>cycles</dt>
+                    <dd className="mono">
+                      {paper.cycles} / {paper.sessions_required}
+                    </dd>
+                  </div>
+                  <div className="stat">
+                    <dt>first session</dt>
+                    <dd className="mono">{paper.first_session ?? "—"}</dd>
+                  </div>
+                  <div className="stat">
+                    <dt>last session</dt>
+                    <dd className="mono">{paper.last_session ?? "—"}</dd>
+                  </div>
+                  <div className="stat">
+                    <dt>days since</dt>
+                    {/* The number that says a scheduler stopped firing. A stalled
+                        clock is indistinguishable from a quiet market otherwise. */}
+                    <dd
+                      className={
+                        paper.days_since_last !== null && paper.days_since_last > 4
+                          ? "mono down"
+                          : "mono"
+                      }
+                    >
+                      {paper.days_since_last ?? "—"}
+                    </dd>
+                  </div>
+                  <div className="stat">
+                    <dt>strategy</dt>
+                    <dd className="mono">
+                      {paper.strategies.length ? paper.strategies.join(", ") : "—"}
+                    </dd>
+                  </div>
+                </dl>
+              )}
+              {paper.halted && (
+                <p className="analytics-note text-critical">{paper.halt_reason}</p>
+              )}
+              {paper.drift_reason && (
+                <p className="block-note">Drift vs backtest: {paper.drift_reason}</p>
+              )}
+            </>
+          ) : (
+            <p className="empty">API unavailable.</p>
+          )}
         </article>
 
         <article className="block block-wide">

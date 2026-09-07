@@ -243,6 +243,7 @@ def persist_outcome(
     state: PaperState,
     report: CycleReport,
     alerts: AlertRouter,
+    strategy: Strategy | None = None,
 ) -> int:
     """Save everything the next cycle needs, then translate halt to exit code.
 
@@ -275,7 +276,12 @@ def persist_outcome(
         )
     store.save(state)
     store.append_equity(
-        report.session, report.closing_equity, state.portfolio.cash, state.portfolio.fees_paid
+        report.session,
+        report.closing_equity,
+        state.portfolio.cash,
+        state.portfolio.fees_paid,
+        strategy=strategy.name if strategy else "",
+        parameters=dict(strategy.spec.parameters) if strategy else {},
     )
     # After the state, for the same reason the state comes before the alert: a
     # failure here loses a blotter row, which is recoverable, while a failure
@@ -387,7 +393,7 @@ def run(argv: list[str] | None = None) -> int:
 
     report = run_cycle_for(state, history, universe, args)
     print(report.format())
-    return persist_outcome(store, state, report, alerts)
+    return persist_outcome(store, state, report, alerts, build_strategy(args))
 
 
 if __name__ == "__main__":

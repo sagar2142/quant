@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from apps.api.auth import ReadAccess
 from apps.api.limits import LimitRow, limit_rows
+from apps.api.paper_status import PaperStatus, paper_status_of
 from apps.api.snapshot import book_snapshot
 from core.instruments import InstrumentId
 from data.feeds.quotes import fetch_quotes
@@ -310,6 +311,19 @@ def _register_logs(router: APIRouter, marks_source: object | None) -> None:
     def equity_curve() -> list[dict[str, str]]:
         """One row per completed cycle. This is the M9 six-week clock (§M9)."""
         return PaperStateStore(DEFAULT_STATE_DIR).equity_history()
+
+    @router.get("/paper/status", response_model=PaperStatus, dependencies=[ReadAccess])
+    def paper_status() -> PaperStatus:
+        """Whether the paper cycle is running, and how far the M9 clock has run.
+
+        The console could say which plane was *armed* — environment, live flag,
+        the four gates — but nothing said whether the scheduled cycle was
+        actually running. Those are different questions with the same answer
+        shape, and the one that goes wrong silently is this one: a workflow that
+        stopped firing looks exactly like a quiet market until someone counts
+        the sessions.
+        """
+        return paper_status_of(PaperStateStore(DEFAULT_STATE_DIR))
 
     @router.get("/quotes", dependencies=[ReadAccess])
     def quotes(symbols: str = "") -> dict[str, object]:
