@@ -13,8 +13,8 @@
 # STATE. Runners are ephemeral, so durable state is committed back to the repo:
 # paper_state.json and paper_equity.ndjson are small text files, and their git
 # history IS the M9 audit trail — every cycle's book, timestamped and immutable.
-# The bar lake is NOT committed; it is cached, and on a cache miss the ingest
-# step refetches the recent window from NSE (resumable, so a miss costs
+# The lake is NOT committed; it is cached, and on a cache miss the ingest steps
+# refetch the recent window from the exchanges (resumable, so a miss costs
 # minutes, not the 2.5-hour full backfill).
 #
 # TIMEZONES. NSE closes 15:30 IST = 10:00 UTC; bhavcopy publishes ~2.5h later.
@@ -67,14 +67,36 @@ jobs:
           key: nse-lake-${{ github.run_started_at }}
           restore-keys: nse-lake-
 
-      - name: Ingest recent sessions
+      - name: Ingest the equity panel
+        # The only feed the paper cycle cannot run without, so it is its own
+        # step and its failure stops the job.
+        #
         # 180 calendar days covers the 60-day universe window plus the 60-bar
-        # momentum lookback with margin. Already-present sessions are skipped,
-        # so against a warm cache this fetches only the new day.
+        # momentum lookback with margin, and is fetched explicitly rather than
+        # left to the planner: `daily` reaches back MAX_CATCHUP_DAYS (15), which
+        # is right for keeping a warm lake current and far too short to seed a
+        # cold one. On a cache miss that difference is the whole backtest.
+        # Already-present sessions are skipped, so against a warm cache this
+        # fetches only the new day.
         run: |
           python -m apps.cli.ingest_nse \
             --start "$(date -u -d '180 days ago' +%F)" \
             --pause 1.0
+
+      - name: Ingest every other feed
+        # BSE, F&O and the index series, plus the cadenced ones — industry
+        # classification, quarterly results, and the announced board-meeting
+        # calendar. The planner works out what each is missing and refuses to
+        # ask for files that are not published yet.
+        #
+        # `continue-on-error` because none of these is required to trade: BSE
+        # goes down more often than NSE does, and an evening where it fails but
+        # the equity panel lands is a good evening. `daily` exits non-zero when
+        # any due feed went unfetched, which is the right signal for a human
+        # and the wrong one for a gate in front of the paper cycle.
+        continue-on-error: true
+        run: |
+          python -m apps.cli.daily --events --alerts --pause 1.0
 
       - name: Run paper cycle
         run: |
@@ -88,6 +110,13 @@ jobs:
         # not know about it.
         if: always()
         run: |
+          # The directory is absent when the cycle failed before writing state.
+          # `git add` on a missing pathspec exits 128, which would fail this
+          # step and bury the actual error under a git one.
+          if [ ! -d paper ]; then
+            echo "no paper/ state written — the cycle failed before it traded"
+            exit 0
+          fi
           git config user.name "paper-bot"
           git config user.email "actions@users.noreply.github.com"
           git add paper/
