@@ -4,13 +4,12 @@
  * A page rather than a popover, because this is where an operator decides who
  * they are and a cramped dropdown is the wrong place to type a password.
  *
- * **It says what signing in does, and does not do.** On this system an account
- * identifies the operator and carries their settings and broker keys. It does
- * not gate the API: that binds to loopback and answers anything on this
- * machine unless `NEUTRON_API_TOKEN` is set. So the page offers a way past
- * itself, labelled honestly, rather than pretending to be a lock. A login
- * screen that looks like protection and is not would be worse than none on a
- * system that can place real orders.
+ * **An account here is identification, not a lock.** It carries the operator's
+ * settings and broker keys; it does not gate the API, which binds to loopback
+ * and answers anything on this machine unless `NEUTRON_API_TOKEN` is set. That
+ * is why "Continue without an account" is on the page rather than hidden — a
+ * login screen that looks like protection and is not would be worse than none
+ * on a system that can place real orders, so the way past it stays visible.
  */
 
 import { useEffect, useState } from "react";
@@ -21,7 +20,12 @@ export type AuthMode = "login" | "register";
 export interface AuthPageProps {
   /** How many accounts exist, so a fresh install opens on register. */
   userCount: number;
-  apiTokenConfigured: boolean;
+  /**
+   * Whether `NEUTRON_API_TOKEN` is set. Not rendered here any more, and kept
+   * because it is part of the account status this page is handed and the
+   * caller should not have to strip it.
+   */
+  apiTokenConfigured?: boolean;
   accountsAvailable: boolean;
   /** Which database holds accounts: "mongodb" or "postgres". */
   backend?: string;
@@ -32,7 +36,6 @@ export interface AuthPageProps {
 
 export function AuthPage({
   userCount,
-  apiTokenConfigured,
   accountsAvailable,
   backend = "postgres",
   onAuthenticated,
@@ -152,7 +155,7 @@ export function AuthPage({
                   <span>Name</span>
                   <input
                     value={displayName}
-                    placeholder="Full name"
+                    placeholder="Your name"
                     autoComplete="name"
                     onChange={(event) => setDisplayName(event.target.value)}
                   />
@@ -164,6 +167,7 @@ export function AuthPage({
                 <input
                   value={email}
                   type="email"
+                  placeholder="you@example.com"
                   autoComplete="username"
                   autoFocus
                   onChange={(event) => setEmail(event.target.value)}
@@ -175,6 +179,7 @@ export function AuthPage({
                 <input
                   value={password}
                   type="password"
+                  placeholder="Your password"
                   autoComplete={mode === "register" ? "new-password" : "current-password"}
                   onChange={(event) => setPassword(event.target.value)}
                 />
@@ -195,14 +200,6 @@ export function AuthPage({
             </button>
           </>
         )}
-
-        {/* The honest footnote. An account is identification here, not a lock,
-            and the page says which rather than letting the reader assume. */}
-        <p className="auth-fineprint">
-          {apiTokenConfigured
-            ? "API access requires a token."
-            : "Accounts hold preferences and broker credentials. API access is controlled separately by NEUTRON_API_TOKEN."}
-        </p>
       </div>
     </div>
   );

@@ -898,16 +898,6 @@ table.grid td:first-child {
   color: var(--text-primary);
 }
 
-/* The honest footnote about what an account is here. */
-.auth-fineprint {
-  border-top: 1px solid var(--border);
-  color: var(--text-tertiary);
-  font-size: 10px;
-  line-height: 1.6;
-  margin: 0;
-  padding-top: var(--space-3);
-}
-
 /* ── the account menu ──────────────────────────────────────────────────────
    A list of destinations, in the shape every desktop tool settles on. */
 
