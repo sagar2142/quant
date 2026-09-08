@@ -155,6 +155,9 @@ by writing code:
 
 ### Running the console
 
+**[RUNNING.md](RUNNING.md) is the full runbook** — every command, and what to do
+when one of them does not work.
+
 ```powershell
 .\dev.ps1               # API on :8000 and console on :5173, both reloading
 .\dev.ps1 -ApiOnly      # API alone, for endpoint or CLI work
