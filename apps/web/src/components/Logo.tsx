@@ -1,24 +1,30 @@
 /**
  * The Neutron mark — MASTER_PLAN §12.2.
  *
- * Two bars around a zero axis, one up and one down, placed so the figure is
- * unchanged by a 180° rotation about its centre. That symmetry *is* the name.
- * A neutron carries no charge; a market-neutral book carries no market — and
- * the central finding of this system's research is that a signal which looked
- * like alpha was 72.7% beta, which is the same statement about what is left
- * once the opposite side cancels.
+ * A ring cut through its middle: a particle, opened along zero.
  *
- * **The axis is drawn, and it is the point.** A bar chart without a zero line
- * is a picture of magnitudes; with one it is a picture of sign. Everything
- * this system measures — P&L, factor contribution, slippage, drawdown — is
- * signed, and the console's own rule is that zero is a measurement rather than
- * an absence.
+ * **The cut is the whole idea.** A neutron carries no charge, and the two arcs
+ * are equal, opposite and separated by exactly the line they are measured
+ * against. A market-neutral book is the same statement — the finding this
+ * system's research keeps returning to is that a signal which looked like alpha
+ * was 72.7% beta, which is what is left once the opposite side cancels. The
+ * figure is unchanged by a 180° rotation about its centre, so the symmetry is
+ * structural rather than decorative.
  *
- * **Drawn to survive 16 pixels**, and cut down until it did. A favicon is the
- * smallest thing an interface renders, and the first version of this mark used
- * four bars — which rasterised to a smudge at tab size, where the strokes and
- * their gaps both fell below two pixels. Three strokes is the whole design now,
- * and the offset silhouette is what carries it once the axis has thinned away.
+ * **The gap is a measurement, not a space.** Everything this system reports is
+ * signed — P&L, factor contribution, slippage, drawdown — and the console's own
+ * rule is that zero is a measurement rather than an absence. The mark draws
+ * zero as the one thing that separates the two halves.
+ *
+ * **Two arcs, because a favicon is sixteen pixels.** Earlier attempts failed
+ * there and the failure is always the same: four bars rasterised to a smudge
+ * when the strokes and their gaps both fell under two pixels, and offsetting
+ * the two halves horizontally read as a printing error rather than as
+ * displacement. A closed curve survives downsampling in a way an arrangement of
+ * separate strokes does not — the eye completes a circle from very little.
+ *
+ * Round terminals on both arcs, so the cut reads as a deliberate slot with
+ * finished ends rather than a shape that was masked off.
  *
  * `currentColor` throughout, so the mark takes the colour of whatever it sits
  * in rather than carrying a brand colour that fights every context.
@@ -32,25 +38,23 @@ export interface LogoProps {
   title?: string;
 }
 
-//: The bars, as (x, height). Positive is above the axis, negative below.
+//: Radius 9 in a 32-unit box, stroked at 5.4, leaves the drawn mark spanning
+//: 4.3 to 27.7 — a little under three units of margin on every side, which is
+//: what keeps it from crowding text set beside it.
 //:
-//: **Two, not four.** The first version had four, alternating, summing to
-//: zero — a truer picture of a book, and unreadable at sixteen pixels: four
-//: strokes and their gaps landed at about one and a half pixels each and the
-//: mark rendered as a smudge. Two bars can be half as wide again, and the
-//: rotational symmetry survives the loss where the detail did not.
-const BARS: readonly (readonly [number, number])[] = [
-  [11, 10],
-  [21, -10],
-];
+//: The arcs meet y = 16 ∓ 1.7, so each terminal sits at x = 16 ± √(9² − 1.7²)
+//: = 16 ± 8.84. A wider gap breaks the circle before the eye can close it; a
+//: narrower one closes up entirely at sixteen pixels and the cut disappears.
+const ARC_LEFT_X = 7.16;
+const ARC_RIGHT_X = 24.84;
+const UPPER_Y = 14.3;
+const LOWER_Y = 17.7;
 
-const AXIS_Y = 16;
-
-//: The axis runs five units past the outermost bar on each side — enough to
-//: read as a reference line rather than a crossbar, short enough not to leave
-//: a tail hanging off the mark.
-const AXIS_X0 = 6;
-const AXIS_X1 = 26;
+//: Both arcs are the major one — their endpoints sit on the *same* side of
+//: centre as the arc itself — so the large-arc flag is set on each. The sweep
+//: differs because they curve away from one another.
+const UPPER_ARC = `M ${ARC_LEFT_X} ${UPPER_Y} A 9 9 0 1 1 ${ARC_RIGHT_X} ${UPPER_Y}`;
+const LOWER_ARC = `M ${ARC_LEFT_X} ${LOWER_Y} A 9 9 0 1 0 ${ARC_RIGHT_X} ${LOWER_Y}`;
 
 export function Logo({ size = 20, wordmark = false, title }: LogoProps) {
   const mark = (
@@ -65,32 +69,8 @@ export function Logo({ size = 20, wordmark = false, title }: LogoProps) {
       focusable="false"
     >
       {title && <title>{title}</title>}
-
-      {/* Zero. Thinner and dimmer than the bars: it is the reference they are
-          measured against, not one of them. */}
-      <line
-        x1={AXIS_X0}
-        y1={AXIS_Y}
-        x2={AXIS_X1}
-        y2={AXIS_Y}
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        opacity="0.45"
-      />
-
-      {BARS.map(([x, height]) => (
-        <line
-          key={x}
-          x1={x}
-          y1={AXIS_Y}
-          x2={x}
-          y2={AXIS_Y - height}
-          stroke="currentColor"
-          strokeWidth="5"
-          strokeLinecap="round"
-        />
-      ))}
+      <path d={UPPER_ARC} stroke="currentColor" strokeWidth="5.4" strokeLinecap="round" />
+      <path d={LOWER_ARC} stroke="currentColor" strokeWidth="5.4" strokeLinecap="round" />
     </svg>
   );
 
