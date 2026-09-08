@@ -3,6 +3,12 @@ name = "neutron"
 version = "0.1.0"
 description = "Personal multi-market quantitative research and trading system"
 requires-python = ">=3.10"
+# Source-available, not open source: any noncommercial use is permitted and
+# selling it is not. See LICENSE, and the README's License section for why a
+# permissive or copyleft licence would not have said that — every OSI licence
+# allows sale, copyleft included.
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 
 dependencies = [
     # core numerics

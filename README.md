@@ -206,3 +206,44 @@ this code and a real order (see `trading/execution/kite.py`), and
 ```powershell
 python -m apps.cli.readiness   # the PDF §40 checklist, executable
 ```
+
+## License
+
+**[PolyForm Noncommercial 1.0.0](LICENSE)** — source-available, not open source.
+
+Read it, run it, learn from it, modify it, publish your changes. Use it for
+study, a hobby, a dissertation, a charity, a university. **Do not sell it, and
+do not use it commercially.** Trading your own money with it is a personal use
+and is fine; charging anyone for it, hosting it as a paid service, or building
+it into a product is not.
+
+That last requirement is why this is not an OSI-approved license and cannot be.
+Free redistribution *including sale* is part of the Open Source Definition, so
+every OSI license permits selling — MIT and Apache openly, and the copyleft ones
+too. AGPL does not prohibit sale; it only forces a seller to publish their
+changes. "Nobody may sell this" and "open source" are mutually exclusive, and
+the honest thing is to say which one this is.
+
+### Third-party licenses
+
+Every dependency was audited (MASTER_PLAN §13). All are permissive — MIT, BSD,
+Apache-2.0, ISC, NCSA — with one exception worth naming:
+
+**`psycopg` is LGPL-3.0-only.** It is imported as a library and never modified
+or statically linked, which is the case the LGPL explicitly permits, so it
+places no obligation on this project's license. Modifying psycopg itself and
+distributing the result would carry LGPL obligations on *those changes*; nothing
+here does that.
+
+### No warranty, and this is not financial advice
+
+This is research software that places orders. It comes as is, with no warranty
+of any kind, and the author is not liable for any damages arising from its use —
+including money lost trading with it.
+
+Nothing in this repository is financial advice or a recommendation. The
+strategies here are hypotheses, most of which have been rejected on purpose: the
+register holds eleven rejections against a handful of open questions, and the
+gauntlet exists to argue against results rather than for them. Anyone pointing
+real capital at any of it is making their own decision and bearing their own
+risk.
