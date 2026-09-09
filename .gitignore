@@ -67,3 +67,6 @@ web.log
 *_demo.log
 
 paper/
+
+# Scheduled-task output. Local operational record, not source.
+logs/

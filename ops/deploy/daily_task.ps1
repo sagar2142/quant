@@ -1,78 +1,61 @@
-# Register the daily ingest with Windows Task Scheduler — MASTER_PLAN §13.4.
+# The nightly ingest, as Windows Task Scheduler runs it -- MASTER_PLAN 13.4.
 #
-#   pwsh -File ops/deploy/daily_task.ps1              # register
-#   pwsh -File ops/deploy/daily_task.ps1 -Unregister  # remove
-#   pwsh -File ops/deploy/daily_task.ps1 -Time 20:15  # a different hour
+# Install with `ops\deploy\install_daily_task.ps1`. Run it by hand any time --
+# it is the same command the scheduler uses, so testing it tests the real thing.
 #
-# Why a scheduled task rather than a GitHub Action: the lake is on this
-# machine. A hosted runner has nowhere to write, and shipping seven years of
-# Parquet to CI to add one session to it is the wrong shape of problem.
+# WHY A SCRIPT RATHER THAN A SCHTASKS ONE-LINER. A scheduled task that fails
+# silently is the failure this system keeps finding: the GitHub workflow was
+# scheduled for fifteen days and produced nothing, and nothing anywhere said so.
+# The one-liner has no log, so the only evidence of a failed run is a lake that
+# quietly stops advancing. This appends every run to a file with its exit code,
+# which makes "did it run last night?" a question with an answer.
 #
-# Runs at 19:45 IST by default — after the last of the four feeds publishes,
-# with room for NSE being late. The planner refuses sessions that are not
-# published yet, so an early run is a no-op rather than a day recorded as
-# unavailable; the margin is for convenience, not correctness.
-#
-# The task runs whether or not you are logged in is deliberately NOT set: it
-# runs as you, in your session, so it inherits your environment (including
-# .env) and writes files you own. A missed evening is caught up the next
-# night, because the planner works from what the lake holds rather than from
-# a schedule it assumes was kept.
+# The log is trimmed rather than rotated. It gains a handful of lines a day and
+# nobody is going to configure logrotate for it, so it keeps the last few
+# thousand and forgets the rest.
 
-[CmdletBinding()]
-param(
-    [string]$Time = "19:45",
-    [string]$TaskName = "Neutron daily ingest",
-    [switch]$Unregister
-)
+$ErrorActionPreference = "Continue"
 
-$ErrorActionPreference = "Stop"
-
-$repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $python = Join-Path $repo ".venv\Scripts\python.exe"
 $logDir = Join-Path $repo "logs"
 $log = Join-Path $logDir "daily.log"
 
-if ($Unregister) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Removed scheduled task '$TaskName'."
-    return
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+function Write-Log($message) {
+    $line = "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $message
+    Add-Content -Path $log -Value $line
+    Write-Host $line
 }
 
 if (-not (Test-Path $python)) {
-    throw "No interpreter at $python. Create the virtualenv first."
-}
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir | Out-Null
+    Write-Log "FAILED  no virtualenv at $python"
+    exit 1
 }
 
-# The IST publication times are what matter, but the task runs on this
-# machine's clock. If you are not in IST, set -Time to the local equivalent of
-# roughly 19:45 IST; the planner will decline anything not yet published, so
-# being late costs nothing and being early costs a retry tomorrow.
-$command = "& '$python' -m apps.cli.daily --check *>> '$log'"
-$action = New-ScheduledTaskAction -Execute "pwsh.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$command`"" `
-    -WorkingDirectory $repo
-$trigger = New-ScheduledTaskTrigger -Daily -At $Time
+Write-Log "start   ingest"
+$env:PYTHONPATH = $repo
+# 2>&1 because the exchanges' failures arrive on stderr and a log missing them
+# would show a clean run that fetched nothing.
+$output = & $python -m apps.cli.daily --events --alerts --pause 1.0 2>&1
+$code = $LASTEXITCODE
 
-# StartWhenAvailable is the point of the whole arrangement: a laptop asleep at
-# 19:45 runs the job when it wakes, and the planner fills whatever gap opened.
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -DontStopIfGoingOnBatteries `
-    -AllowStartIfOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+foreach ($line in $output) { Add-Content -Path $log -Value ("        " + $line) }
 
-Register-ScheduledTask -TaskName $TaskName `
-    -Action $action -Trigger $trigger -Settings $settings `
-    -Description "Fetch NSE, BSE, F&O and index sessions the lake is missing." `
-    -Force | Out-Null
+if ($code -eq 0) {
+    Write-Log "ok      ingest complete"
+} else {
+    # Non-zero means a feed that was due went unfetched. Named rather than
+    # swallowed: this is the line someone greps for when a screen looks stale.
+    Write-Log "FAILED  ingest exit $code -- a due feed went unfetched"
+}
 
-Write-Host "Registered '$TaskName' for $Time daily."
-Write-Host "  repo:  $repo"
-Write-Host "  log:   $log"
-Write-Host ""
-Write-Host "Check it without waiting:"
-Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  $python -m apps.cli.daily --dry-run"
+# Keep the tail. Cheap, and it runs after the write so a crash mid-ingest still
+# leaves the evidence of what it was doing.
+if (Test-Path $log) {
+    $kept = Get-Content $log -Tail 4000
+    Set-Content -Path $log -Value $kept
+}
+
+exit $code

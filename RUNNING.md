@@ -67,6 +67,36 @@ It works out what each is missing and refuses to ask for files that are not
 published yet, so it is safe to run repeatedly and safe to run at the wrong time
 of day.
 
+### Automatically, every evening
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\deploy\install_daily_task.ps1
+```
+
+Registers a Windows scheduled task for weekdays at 19:15 IST -- NSE closes at
+15:30 and the bhavcopy publishes about two and a half hours later, so that
+leaves forty-five minutes of slack. Every run appends to `logs\daily.log` with
+its exit code, so "did it run last night?" has an answer; a task that fails
+silently is the failure this project already hit once with GitHub Actions.
+
+```powershell
+Get-ScheduledTaskInfo -TaskName neutron-daily     # last result, next run
+Start-ScheduledTask   -TaskName neutron-daily     # run it now
+powershell -ExecutionPolicy Bypass -File ops\deploy\install_daily_task.ps1 -Remove
+```
+
+It fires on exchange holidays too, deliberately: the planner already treats an
+unpublished session as a no-op, and keeping the holiday calendar in two places
+is how the two come to disagree.
+
+**This updates the lake on *this machine*.** The GitHub workflow keeps its own
+cached lake on the runner; they are separate.
+
+### Or from the console
+
+System workspace -> Operations -> **Fetch today's data**. Same command, run as a
+background job, with the output shown in the panel.
+
 Individual feeds, when you want one specifically:
 
 ```powershell
