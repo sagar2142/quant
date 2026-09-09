@@ -1,5 +1,13 @@
 # Paper trading on GitHub Actions — MASTER_PLAN §0.4 (100% free resources), §M9.
 #
+# NOT INSTALLED IN THIS REPOSITORY. The cycle runs from a Windows scheduled
+# task instead (`ops/deploy/install_daily_task.ps1`), because it must have
+# exactly one owner: this workflow commits the book back to the repo, so a
+# second machine trading the same account produces a second book and a merge
+# conflict on the next pull. Kept for an operator who would rather the run
+# lived on a runner than a laptop — copy it to `.github/workflows/paper.yml`
+# and remove the scheduled task.
+#
 # WHY THIS SHAPE. Daily-frequency NSE trading needs one cycle per session, not a
 # daemon (§20). A scheduled job that starts, trades once and exits fits inside
 # the free tier's compute model exactly, and a job that exits cannot wedge

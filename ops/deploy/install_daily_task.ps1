@@ -17,9 +17,10 @@
 # eventually disagree.
 #
 # MISSED RUNS. `StartWhenAvailable` catches the ordinary case of a laptop that
-# was shut at 19:15 -- the task runs when the machine next wakes. A run missed
-# entirely is recoverable anyway: the planner fetches whatever is missing, so
-# the next successful run catches up on its own.
+# was shut at 19:15 -- the task runs when the machine next wakes. The machine is
+# not woken deliberately: a laptop that starts fetching bhavcopies at quarter
+# past seven while shut in a bag is worse behaviour than a lake that catches up
+# an hour later, and the planner fetches whatever is missing either way.
 
 param([switch]$Remove)
 
@@ -53,9 +54,16 @@ $trigger = New-ScheduledTaskTrigger -Weekly `
 # a reachable exchange, so it blocks on a VPN quirk while letting a genuinely
 # offline run through. The ingest reports its own failure, which is the honest
 # place for it.
+# Battery settings are the ones that matter on a laptop, and both default the
+# wrong way for this: Task Scheduler will not START a task on battery, and will
+# KILL a running one the moment the charger comes out. Either way the run is
+# skipped and nothing says so -- the lake simply stops advancing. An ingest is
+# a minute of network, not a render farm.
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -DontStopOnIdleEnd `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
     -MultipleInstances IgnoreNew
 
@@ -65,6 +73,7 @@ Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
 
 Write-Host ""
 Write-Host "  registered '$name' -- weekdays 19:15 IST" -ForegroundColor Green
+Write-Host "  runs on battery, and is not stopped by unplugging"
 Write-Host "  log:    $(Join-Path $repo 'logs\daily.log')"
 Write-Host "  run it: Start-ScheduledTask -TaskName $name"
 Write-Host "  remove: ops\deploy\install_daily_task.ps1 -Remove"

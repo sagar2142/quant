@@ -45,6 +45,28 @@ foreach ($line in $output) { Add-Content -Path $log -Value ("        " + $line) 
 
 if ($code -eq 0) {
     Write-Log "ok      ingest complete"
+
+    # The simulation runs here and nowhere else. It was also in the GitHub
+    # workflow, which committed its book back to the repo -- two machines
+    # trading one account produce two different books and a merge conflict on
+    # the next pull, so there is exactly one owner and this is it.
+    #
+    # Only after a clean ingest: a cycle on a stale panel would trade
+    # yesterday's prices and record the result as today's.
+    Write-Log "start   simulation cycle"
+    $cycle = & $python -m apps.cli.paper --top 30 2>&1
+    $cycleCode = $LASTEXITCODE
+    foreach ($line in $cycle) { Add-Content -Path $log -Value ("        " + $line) }
+
+    if ($cycleCode -eq 2) {
+        # A reconciliation halt. It survives restarts and only a human clears
+        # it, so every later run will keep reporting this until someone does.
+        Write-Log "HALTED  reconciliation break -- investigate, then: python -m apps.cli.paper --clear-halt"
+    } elseif ($cycleCode -ne 0) {
+        Write-Log "FAILED  cycle exit $cycleCode"
+    } else {
+        Write-Log "ok      cycle complete"
+    }
 } else {
     # Non-zero means a feed that was due went unfetched. Named rather than
     # swallowed: this is the line someone greps for when a screen looks stale.
