@@ -17,8 +17,10 @@ import pytest
 
 from core.clock import utc_now
 from core.instruments import AssetClass, Currency, Exchange, Instrument, InstrumentId
-from engine.accounting import Portfolio
+from core.orders import Side
+from engine.accounting import Fill, Portfolio
 from engine.costs.india import NseEquityCostModel
+from engine.costs.model import CostBreakdown
 from trading.execution.broker import BrokerPosition, PaperBroker
 from trading.paper.session import CycleInputs, PaperSession
 from trading.paper.state import PaperState, PaperStateStore, StateCorruptError
@@ -330,3 +332,65 @@ class TestStateRoundTrip:
         assert len(history) == 3
         assert history[0]["session"] == "2026-08-10"
         assert history[2]["equity"] == "1000002"
+
+
+class TestHeldNamesStayMarkable:
+    """A holding that leaves the ranking is still on the book.
+
+    `Portfolio.equity` refuses to guess at a missing mark, so a cycle that
+    builds its instrument set from the current universe alone crashes the first
+    time a position drops out of it. Found by running the simulation forward
+    onto a fresh session — the backtester never sees this, because there the
+    universe and the book come off the same frame on every bar.
+    """
+
+    def test_a_position_outside_the_universe_is_covered(self) -> None:
+        import argparse
+        from datetime import datetime
+
+        import polars as pl
+
+        from apps.cli.paper import run_cycle_for
+        from core.clock import UTC
+
+        held = "NSE:INE000H01010"
+        ranked = "NSE:INE000A01011"
+        rows = []
+        for day in range(70):
+            stamp = datetime(2026, 6, 1, tzinfo=UTC) + timedelta(days=day)
+            for iid, symbol, price in ((held, "DROPPED", 100.0), (ranked, "RANKED", 250.0)):
+                rows.append(
+                    {
+                        "instrument_id": iid,
+                        "symbol": symbol,
+                        "event_time": stamp,
+                        "receive_time": stamp,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price + day,
+                        "volume": 1_000_000.0,
+                    }
+                )
+        history = pl.DataFrame(rows)
+
+        state = PaperState(
+            strategy_id="test",
+            portfolio=Portfolio(cash=Decimal(500_000)),
+            peak_equity=Decimal(1_000_000),
+        )
+        state.portfolio.apply_fill(
+            Fill(
+                instrument_id=InstrumentId(held),
+                side=Side.BUY,
+                quantity=Decimal(10),
+                price=Decimal(100),
+                costs=CostBreakdown(),
+                event_time=utc_now(),
+            )
+        )
+
+        args = argparse.Namespace(lookback=60, skip=5, gross=Decimal("0.9"), top=1)
+        # The universe contains only the ranked name; the held one has dropped.
+        report = run_cycle_for(state, history, (InstrumentId(ranked),), args)
+        assert report is not None

@@ -162,3 +162,101 @@ class TestDayCount:
         sensitivities = greeks(SPOT, STRIKE, YEARS, RATE, VOL, CALL)
         assert sensitivities is not None
         assert -1.0 < sensitivities.theta < 0.0
+
+
+class TestImpliedUnderlying:
+    """Which underlying the chain is priced against — MASTER_PLAN §9.
+
+    NSE stamps the *cash* close on option rows, but Indian stock options trade
+    against the futures. Pricing off the smaller number pushes call implied
+    volatility up and put implied volatility down and invents a skew that is
+    not in the market. Put-call parity recovers the right number from the
+    quotes themselves.
+    """
+
+    def chain(self, spot: float = 1309.0, strikes=(1280, 1300, 1320, 1340), **over):
+        """A synthetic chain that satisfies parity exactly at `spot`."""
+        import math
+
+        from apps.api.options import _f  # noqa: F401 - import guard only
+
+        rate, years = 0.065, 0.0712
+        rows: dict[float, dict[str, dict[str, object]]] = {}
+        for k in strikes:
+            # C - P = S - K*e^(-rT), split around a plausible call value.
+            call = max(1.0, spot - k * math.exp(-rate * years)) + 20.0
+            put = call - (spot - k * math.exp(-rate * years))
+            rows[float(k)] = {
+                CALL: {"close": call, "volume": 1000.0},
+                PUT: {"close": put, "volume": 1000.0},
+            }
+        for k, patch in over.items():
+            rows[float(k)] = patch
+        return rows, years, rate
+
+    def test_it_recovers_the_underlying_parity_implies(self) -> None:
+        from apps.api.options import implied_underlying
+
+        rows, years, rate = self.chain(spot=1309.0)
+        found = implied_underlying(rows, years, rate)
+        assert found is not None
+        assert found == pytest.approx(1309.0, abs=0.05)
+
+    def test_an_untraded_strike_does_not_move_it(self) -> None:
+        """The failure this guards: one stale far strike vetoing a good chain.
+
+        On a real RELIANCE chain, 1180 implied 1324.50 on zero call volume and
+        1430 implied 1316.79 on zero put volume, while every traded strike
+        agreed within a rupee.
+        """
+        from apps.api.options import implied_underlying
+
+        rows, years, rate = self.chain(spot=1309.0)
+        rows[1180.0] = {
+            CALL: {"close": 140.0, "volume": 0.0},  # stale, never traded
+            PUT: {"close": 1.0, "volume": 500.0},
+        }
+        found = implied_underlying(rows, years, rate)
+        assert found is not None
+        assert found == pytest.approx(1309.0, abs=0.05)
+
+    def test_too_few_traded_pairs_is_refused(self) -> None:
+        """A forward from two strikes is a guess with a decimal point."""
+        from apps.api.options import implied_underlying
+
+        rows, years, rate = self.chain(spot=1309.0, strikes=(1300, 1320))
+        assert implied_underlying(rows, years, rate) is None
+
+    def test_an_inconsistent_chain_is_refused(self) -> None:
+        """Quotes that no single underlying explains fall back to the cash
+        close, which is biased but known — better than an invented forward."""
+        from apps.api.options import implied_underlying
+
+        rows, years, rate = self.chain(spot=1309.0)
+        for i, k in enumerate(sorted(rows)):
+            rows[k][CALL]["close"] = float(rows[k][CALL]["close"]) + i * 40.0
+        assert implied_underlying(rows, years, rate) is None
+
+    def test_expired_contracts_have_no_forward(self) -> None:
+        from apps.api.options import implied_underlying
+
+        rows, _years, rate = self.chain()
+        assert implied_underlying(rows, 0.0, rate) is None
+
+    def test_calls_and_puts_agree_once_priced_off_it(self) -> None:
+        """The point of the whole exercise. Priced against the parity
+        underlying, a call and a put on the same strike must return the same
+        implied volatility — it is the same contract seen from two sides."""
+        from apps.api.options import implied_underlying
+
+        rows, years, rate = self.chain(spot=1309.0)
+        spot = implied_underlying(rows, years, rate)
+        assert spot is not None
+        for strike, legs in rows.items():
+            call_vol = implied_volatility(
+                float(legs[CALL]["close"]), spot, strike, years, rate, CALL
+            )
+            put_vol = implied_volatility(float(legs[PUT]["close"]), spot, strike, years, rate, PUT)
+            if call_vol is None or put_vol is None:
+                continue
+            assert call_vol == pytest.approx(put_vol, abs=1e-4)

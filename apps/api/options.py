@@ -19,6 +19,7 @@ could not be inverted.
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
@@ -82,7 +83,14 @@ class ChainResponse(BaseModel):
     session: date
     expiry: date
     days_to_expiry: int
+    #: The cash close NSE stamped on these contracts.
     underlying_price: float
+    #: What every price on this chain was actually computed against, and where
+    #: it came from. Reported rather than assumed: a reader comparing an
+    #: implied volatility here against another screen needs to know which
+    #: underlying produced it.
+    pricing_price: float
+    pricing_source: str
     lot_size: float
     rate: float
     rows: list[ChainRow]
@@ -110,6 +118,86 @@ def _f(value: object) -> float:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.0
+
+
+#: Paired strikes needed before the chain is allowed to price itself.
+#:
+#: Three is enough for a median to survive one stale quote and few enough that
+#: a thin chain still gets a forward. Below it the cash close is the honest
+#: fallback — a forward inferred from two strikes is a guess with a decimal
+#: point.
+MIN_PARITY_PAIRS = 3
+
+#: How far the *middle half* of the estimates may disagree, as a fraction of
+#: the median, before the chain is treated as inconsistent.
+#:
+#: **Measured across the middle half, not end to end.** The first version of
+#: this checked min against max, which is not a robust statistic and threw away
+#: the reason for taking a median in the first place. On a real RELIANCE chain
+#: it rejected a perfectly good forward: thirty-one strikes spanned 1.60% end to
+#: end and 0.19% across the middle half, and every outlier was a strike that had
+#: not traded — 1180 implied 1324.50 on zero call volume, 1430 implied 1316.79
+#: on zero put volume. One untraded far strike is enough to veto the whole
+#: chain when the test is min against max.
+MAX_PARITY_SPREAD = 0.005
+
+
+def implied_underlying(
+    by_strike: dict[float, dict[str, dict[str, object]]], years: float, rate: float
+) -> float | None:
+    """The underlying price the option quotes are consistent with, or None.
+
+    **The cash close is the wrong number to price these with.** NSE stamps
+    `UndrlygPric` from the cash market, but Indian stock options trade against
+    the futures, which carry. On RELIANCE that gap was ₹6.50 — cash at 1302.50
+    against 1309 — and pricing off the smaller number pushed call implied
+    volatility up and put implied volatility down by about five points each,
+    inventing a skew that is not in the market. Every Greek inherited the same
+    bias.
+
+    Put-call parity gives the right number without needing the futures leg at
+    all: `C - P = S - K·e^(-rT)`, so each paired strike is one estimate of S,
+    and a real chain agrees across all of them. The median is taken rather than
+    the mean because one untraded far strike prints a stale quote, and a mean
+    would let it move the whole surface.
+
+    Returns None when the chain cannot vouch for itself — too few pairs, or
+    estimates that disagree by more than `MAX_PARITY_SPREAD`. The caller then
+    falls back to the cash close and says so, because a made-up forward would
+    be worse than a known-biased one nobody was told about.
+    """
+    if years <= 0:
+        return None
+    discount = math.exp(-rate * years)
+
+    # Both legs must have traded. A strike that printed no volume carries an
+    # older quote against today's other leg, and parity across those two
+    # describes nothing. On a real RELIANCE chain this is the single largest
+    # source of disagreement — 1180 implied 1324.50 on zero call volume, 1430
+    # implied 1316.79 on zero put volume — and excluding it costs only the
+    # strikes nobody wanted.
+    estimates = sorted(
+        (_f(legs[CALL]["close"]) - _f(legs[PUT]["close"])) + strike * discount
+        for strike, legs in by_strike.items()
+        if CALL in legs
+        and PUT in legs
+        and _f(legs[CALL]["close"]) > 0
+        and _f(legs[PUT]["close"]) > 0
+        and _f(legs[CALL]["volume"]) > 0
+        and _f(legs[PUT]["volume"]) > 0
+    )
+    if len(estimates) < MIN_PARITY_PAIRS:
+        return None
+
+    middle = estimates[len(estimates) // 2]
+    if middle <= 0:
+        return None
+    # Across the middle half, not end to end. See MAX_PARITY_SPREAD.
+    low = estimates[len(estimates) // 4]
+    high = estimates[(3 * len(estimates)) // 4]
+    if (high - low) / middle > MAX_PARITY_SPREAD:
+        return None
+    return middle
 
 
 def _leg(row: dict[str, object], spot: float, years: float, rate: float) -> ContractLeg:
@@ -186,6 +274,11 @@ def assemble_chain(
         strike = _f(row["strike"])
         by_strike.setdefault(strike, {})[str(row["right"])] = row
 
+    # What the options are actually trading against, which is not the cash
+    # close NSE stamps on them. See `implied_underlying`.
+    parity = implied_underlying(by_strike, years, rate)
+    pricing_spot = parity if parity is not None else spot
+
     strikes = sorted(by_strike)
     # Centred on the money. A full chain is mostly strikes nobody trades,
     # and returning all of them buries the ones that matter.
@@ -200,8 +293,8 @@ def assemble_chain(
         legs = by_strike[strike]
         call_row = legs.get(CALL)
         put_row = legs.get(PUT)
-        call = _leg(call_row, spot, years, rate) if call_row else None
-        put = _leg(put_row, spot, years, rate) if put_row else None
+        call = _leg(call_row, pricing_spot, years, rate) if call_row else None
+        put = _leg(put_row, pricing_spot, years, rate) if put_row else None
         if call and put:
             gap = abs(call.close - put.close)
             if gap < smallest_gap:
@@ -215,6 +308,8 @@ def assemble_chain(
         expiry=wanted,
         days_to_expiry=days,
         underlying_price=spot,
+        pricing_price=pricing_spot,
+        pricing_source="parity" if parity is not None else "cash",
         lot_size=lot,
         rate=rate,
         rows=rows,

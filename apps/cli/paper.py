@@ -23,14 +23,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
 
 from apps.cli.backtest import build_universe, load_panel, nse_instrument
-from core.clock import UTC, as_decision_time, utc_now
+from apps.cli.paper_market import latest_marks, latest_view, trailing_adv
+from core.clock import utc_now
 from core.config import settings
 from core.instruments import Instrument, InstrumentId
 from core.secrets import assert_not_live
@@ -41,15 +42,12 @@ from engine.costs.india import NseEquityCostModel
 from ops.alerts import AlertRouter
 from ops.routing import build_router, describe_channels
 from quant.analytics.clusters import assign_clusters
-from quant.strategies.base import MarketView, Strategy
+from quant.strategies.base import Strategy
 from quant.strategies.baselines import CrossSectionalMomentum
 from trading.execution.broker import BrokerPosition, PaperBroker
 from trading.paper.session import CycleInputs, CycleReport, PaperSession
 from trading.paper.state import PaperState, PaperStateStore, StateCorruptError
 from trading.risk.engine import RiskEngine
-
-#: Trailing window for average daily traded value, matching the risk limits.
-ADV_WINDOW = 20
 
 HALTED_EXIT = 2
 
@@ -79,38 +77,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Acknowledge a reconciliation halt and continue. A human decision.",
     )
     return parser.parse_args(argv)
-
-
-def latest_view(history: pl.DataFrame, universe: tuple[InstrumentId, ...]) -> MarketView:
-    """Everything observable as of the latest session's publication."""
-    last = history["event_time"].max()
-    assert isinstance(last, datetime)
-    as_of = as_decision_time(datetime.combine(last.date(), time(23, 59), tzinfo=UTC))
-    return MarketView(as_of=as_of, history=history, universe=universe)
-
-
-def latest_marks(history: pl.DataFrame) -> dict[InstrumentId, Decimal]:
-    latest = history.sort("event_time").group_by("instrument_id").agg(pl.col("close").last())
-    return {
-        InstrumentId(i): Decimal(str(c))
-        for i, c in zip(latest["instrument_id"], latest["close"], strict=True)
-    }
-
-
-def trailing_adv(history: pl.DataFrame) -> dict[InstrumentId, Decimal]:
-    """Mean traded value over the trailing window, per name."""
-    sessions = history["event_time"].unique().sort().tail(ADV_WINDOW)
-    window = history.filter(pl.col("event_time").is_in(sessions.implode()))
-    value = (
-        window.with_columns((pl.col("close") * pl.col("volume")).alias("traded"))
-        .group_by("instrument_id")
-        .agg(pl.col("traded").mean())
-    )
-    return {
-        InstrumentId(i): Decimal(str(round(v, 2)))
-        for i, v in zip(value["instrument_id"], value["traded"], strict=True)
-        if v is not None and v > 0
-    }
 
 
 def load_or_create_state(store: PaperStateStore, strategy_id: str, cash: Decimal) -> PaperState:
@@ -201,7 +167,23 @@ def run_cycle_for(
 ) -> CycleReport:
     """Assemble the market and run one cycle. Pure assembly, no persistence."""
     symbols = dict(history.select("instrument_id", "symbol").unique().iter_rows())
-    instruments = {InstrumentId(i): nse_instrument(i, symbols.get(i, i)) for i in universe}
+
+    # The universe *and* whatever is already held. A name that ranked into the
+    # top 30 last cycle and out of it this one is still on the book, and a book
+    # that cannot be valued cannot be traded: `Portfolio.equity` refuses to
+    # guess at a missing mark, so building this from the universe alone crashes
+    # the cycle the first time a holding drops out of the ranking.
+    #
+    # Found by running the simulation forward, which is what it is for — the
+    # backtester never sees it, because there the universe and the book are
+    # rebuilt from the same frame on every bar.
+    held = tuple(
+        instrument_id
+        for instrument_id, position in state.portfolio.positions.items()
+        if not position.is_flat
+    )
+    covered = dict.fromkeys((*universe, *held))
+    instruments = {InstrumentId(i): nse_instrument(i, symbols.get(i, i)) for i in covered}
 
     strategy = build_strategy(args)
     weights = strategy(latest_view(history, universe))
