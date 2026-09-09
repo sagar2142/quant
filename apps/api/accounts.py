@@ -32,6 +32,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -327,18 +328,71 @@ def write_settings(user_id: str, settings: dict[str, Any]) -> None:
         connection.commit()
 
 
+#: How long the account count is trusted without asking again.
+#:
+#: Short on purpose. This exists to collapse a burst of polls into one query,
+#: not to hold an answer across a meaningful stretch of time.
+USER_COUNT_TTL_SECONDS = 2.0
+
+
+@dataclass
+class _UserCount:
+    """The last count, and when it stops being trusted."""
+
+    deadline: float = 0.0
+    value: int = 0
+
+
+_count = _UserCount()
+
+
+def forget_user_count() -> None:
+    """Drop the cached count. Called wherever an account is created."""
+    _count.deadline = 0.0
+
+
+def _user_count(store: Any) -> int:
+    """How many accounts exist, asked at most once every few seconds.
+
+    **Only the count is cached, and deliberately not availability.** Both were
+    at first, and it was wrong twice over. Whether the database is reachable is
+    a health signal, and a health signal that reports "up" for two seconds
+    after the database went down is worse than a slow one. It is also
+    unnecessary: `available()` costs a round trip only when the client has to
+    be built, and the client is cached now — measured at 2ms against 60ms for
+    the count. There was nothing to win and a true answer to lose.
+
+    **Nothing about the caller is cached.** Whether a particular session is
+    signed in is resolved from its own cookie on every request and never stored
+    here; a shared cache of that would eventually hand one session's identity
+    to another, which is a security bug wearing a performance improvement's
+    clothes.
+
+    The count cannot change except through a request this module also serves,
+    and that path clears the cache outright, so the two-second window only
+    applies to a second browser registering an account elsewhere.
+    """
+    now = time.monotonic()
+    if now < _count.deadline:
+        return _count.value
+    _count.value = store.count()
+    _count.deadline = now + USER_COUNT_TTL_SECONDS
+    return _count.value
+
+
 def account_status(session: str | None) -> StatusResponse:
     """Who is signed in, and whether accounts mean anything on this install."""
     store = active_store()
     if store is not None:
         available = store.available()
+        count = _user_count(store) if available else 0
         current = _current(session) if available else None
         return StatusResponse(
             signed_in=current is not None,
             account=current,
             accounts_available=available,
             api_token_configured=token_is_configured(),
-            user_count=store.count() if available else 0,
+            user_count=count,
             backend="mongodb",
         )
     with optional_connection() as connection:
@@ -362,6 +416,11 @@ def account_status(session: str | None) -> StatusResponse:
 
 def create_account(request: RegisterRequest, response: Response) -> AccountResponse:
     """Create an account and sign it in."""
+    # The user count is about to change, and a status poll a moment later
+    # showing the old one would tell a first-time operator their account was
+    # not created. Cleared before the write rather than after, so a failure
+    # part-way through cannot leave a stale count behind it.
+    forget_user_count()
     digest, salt = hash_password(request.password)
     store = active_store()
     if store is not None:

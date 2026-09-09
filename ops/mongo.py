@@ -35,6 +35,7 @@ __all__ = [
     "mongo_available",
     "mongo_client",
     "mongo_database",
+    "warm_mongo_client",
 ]
 
 
@@ -186,6 +187,25 @@ def mongo_client() -> Iterator[object | None]:
     yield client
 
 
+def warm_mongo_client() -> bool:
+    """Open and cache the client now, so no user request pays for it.
+
+    Returns:
+        Whether a usable client was established.
+
+    The first connection to Atlas costs seconds — DNS and SRV resolution, TCP,
+    TLS, SCRAM, then a verifying ping — and whoever triggers it waits. Called at
+    API startup that cost lands on boot, where nobody is watching, instead of on
+    the first page load, where somebody is.
+
+    Safe to call when Mongo is not configured: it reports False and does
+    nothing, because an install using Postgres for accounts should not be made
+    to wait for a database it does not use.
+    """
+    with mongo_client() as client:
+        return client is not None
+
+
 @contextmanager
 def mongo_database() -> Iterator[object | None]:
     """The `neutron` database, or None when Mongo is unavailable."""
@@ -194,4 +214,3 @@ def mongo_database() -> Iterator[object | None]:
             yield None
             return
         yield client[database_name()]  # type: ignore[index]
-
