@@ -98,7 +98,7 @@ export function Journal({ apiBase = "/api" }: { apiBase?: string }) {
           aria-label="mode"
         >
           <option value="">all orders</option>
-          <option value="PAPER">paper</option>
+          <option value="PAPER">simulated</option>
           <option value="LIVE">live</option>
         </select>
         <span className="analytics-spacer" />

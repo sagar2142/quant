@@ -119,12 +119,13 @@ const STEPS: Step[] = [
   },
   {
     n: 8,
-    title: "Paper trade it",
+    title: "Simulate it forward",
     cost: "6+ weeks of calendar",
     what:
-      "One cycle per session against real prices, simulated fills. Measures drift " +
-      "between what the backtest promised and what happens — the single most " +
-      "informative number the system produces.",
+      "One cycle per session against real closing prices, with simulated fills and " +
+      "no money involved. Measures the drift between what the backtest promised and " +
+      "what the market actually did — the single most informative number the system " +
+      "produces, and the only one measured forward rather than over history.",
     command: "python -m apps.cli.paper --top 30",
     failure:
       "Exit code 2 means HALTED on a reconciliation break. It survives restarts and " +
@@ -254,7 +255,7 @@ export function Tutorial({ onDismiss }: { onDismiss?: () => void }) {
           <>
             <p className="tut-lede">
               Analysis screens answer research questions. Operations screens
-              monitor a running book, and stay quiet until you paper trade.
+              monitor a running book, and stay quiet until the simulation runs.
             </p>
             <table className="grid">
               <thead>
@@ -285,7 +286,7 @@ export function Tutorial({ onDismiss }: { onDismiss?: () => void }) {
               </tbody>
             </table>
             <div className="analytics-note text-secondary">
-              Operations screens are near-empty until the paper loop has run for
+              Operations screens are near-empty until the simulation has run for
               a while. That is correct — they describe a running book, and one
               cycle of history is not one. Where a number has not been measured
               they show an em dash rather than a zero: an unreconciled book is

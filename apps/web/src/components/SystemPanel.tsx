@@ -179,7 +179,7 @@ export function SystemPanel() {
 
         <article className="block">
           <header className="panel-header">
-            Paper cycle
+            Strategy simulation
             {paper && (
               <span className={paper.started ? "badge live" : "badge blocked"}>
                 {paper.halted ? "HALTED" : paper.started ? "RUNNING" : "NOT STARTED"}
@@ -193,9 +193,10 @@ export function SystemPanel() {
                   what a stalled scheduler means. */}
               {!paper.started ? (
                 <p className="empty">
-                  No cycle has ever written state. The M9 clock has not started — the
-                  scheduled workflow runs from the default branch, so it only fires once
-                  this is merged there.
+                  Not started. This runs the strategy once per session against real
+                  closing prices with simulated fills, and measures what it would have
+                  done. Nothing here is money. The scheduled job runs from the default
+                  branch, so it only fires once this is merged there.
                 </p>
               ) : (
                 <dl className="stats">
