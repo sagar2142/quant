@@ -83,6 +83,7 @@ export function AccountPanel({ status, onAction }: AccountPanelProps) {
 /** Reads `/account/status`, and re-reads it on demand. */
 export function useAccount() {
   const [status, setStatus] = useState<AccountStatus | null>(null);
+  const [resolved, setResolved] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -90,6 +91,13 @@ export function useAccount() {
       setStatus(response.ok ? ((await response.json()) as AccountStatus) : null);
     } catch {
       setStatus(null);
+    } finally {
+      // Separate from `status`, because null is two different answers: the
+      // request has not come back yet, or it came back and there is no
+      // database. A caller that cannot tell them apart has to guess which
+      // screen to show, and guessing is what made the console render the
+      // workspace and then replace it with the sign-in card.
+      setResolved(true);
     }
   }, []);
 
@@ -102,5 +110,5 @@ export function useAccount() {
     await refresh();
   }, [refresh]);
 
-  return { status, refresh, signOut };
+  return { status, resolved, refresh, signOut };
 }

@@ -898,6 +898,16 @@ table.grid td:first-child {
   color: var(--text-primary);
 }
 
+/* The frame before the session is known. Same card as the sign-in page, so
+   the transition into it is a change of contents rather than of scenery. */
+.auth-loading {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+}
+
 /* ── the account menu ──────────────────────────────────────────────────────
    A list of destinations, in the shape every desktop tool settles on. */
 

@@ -28,6 +28,7 @@ import { AccountPanel, useAccount } from "./components/Account";
 import type { AccountAction } from "./components/AccountMenu";
 import { AccountSettings, type SettingsSection } from "./components/AccountSettings";
 import { AuthPage } from "./components/AuthPage";
+import { Logo } from "./components/Logo";
 import { CommandBar } from "./components/CommandBar";
 import {
   Detached,
@@ -205,7 +206,12 @@ export function App({
   //: Who is signed in, and which account surface is showing. `null` means the
   //: console itself; the auth and settings pages take over the whole window
   //: because neither belongs in a dropdown.
-  const { status: accountStatus, refresh: refreshAccount, signOut } = useAccount();
+  const {
+    status: accountStatus,
+    resolved: accountResolved,
+    refresh: refreshAccount,
+    signOut,
+  } = useAccount();
   const [accountView, setAccountView] = useState<"none" | "auth" | "settings">(initial.account);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(
     initial.section as SettingsSection,
@@ -310,6 +316,22 @@ export function App({
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  //: Until the status comes back there is no honest screen to show. Rendering
+  //: the console and replacing it a moment later is the worst of the options:
+  //: it shows a workspace the operator may not be entitled to, and the swap
+  //: reads as the app having crashed and recovered. A cold Atlas connection
+  //: takes seconds, so this is not a hypothetical frame.
+  if (!accountResolved && accountView !== "auth") {
+    return (
+      <div className="authpage">
+        <div className="auth-card auth-loading">
+          <Logo size={38} />
+          <p className="muted">Checking your session…</p>
+        </div>
+      </div>
+    );
+  }
 
   //: Shown before the console on a fresh install, and whenever the operator
   //: asks for it. Not a lock — the page says so itself — but the right first
