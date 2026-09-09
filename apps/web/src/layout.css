@@ -908,6 +908,29 @@ table.grid td:first-child {
   padding: var(--space-6) var(--space-5);
 }
 
+/* Starting the daily work from the console rather than a terminal. */
+.ops-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.ops-output {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  margin: var(--space-3) 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: var(--space-3);
+  white-space: pre-wrap;
+}
+
 /* ── the account menu ──────────────────────────────────────────────────────
    A list of destinations, in the shape every desktop tool settles on. */
 

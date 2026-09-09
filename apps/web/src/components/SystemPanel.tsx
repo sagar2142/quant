@@ -23,6 +23,17 @@ interface Venue {
   last: string | null;
 }
 
+interface RunningJob {
+  id: string;
+  kind: string;
+  label: string;
+  state: string;
+  progress: string;
+  elapsed_seconds: number;
+  error: string;
+  result: { exit_code?: number; output?: string[] } | null;
+}
+
 interface PaperStatus {
   started: boolean;
   cycles: number;
@@ -75,6 +86,7 @@ export function SystemPanel() {
   const [health, setHealth] = useState<Health | null>(null);
   const [options, setOptions] = useState<number | null>(null);
   const [paper, setPaper] = useState<PaperStatus | null>(null);
+  const [job, setJob] = useState<RunningJob | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
@@ -102,6 +114,45 @@ export function SystemPanel() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Poll only while something is running. A console that polls a finished job
+  // forever is a console quietly holding a connection open all day.
+  useEffect(() => {
+    if (!job || job.state !== "running") return;
+    const timer = setInterval(() => {
+      void fetch(`/api/lab/jobs/${job.id}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((next: RunningJob | null) => {
+          if (!next) return;
+          setJob(next);
+          // The panel's own numbers are what the job just changed, so they are
+          // re-read once it finishes rather than left showing the old ones.
+          if (next.state !== "running") load();
+        })
+        .catch(() => undefined);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [job, load]);
+
+  const start = useCallback(async (path: string, body: Record<string, unknown>) => {
+    setJob(null);
+    const response = await fetch(`/api/system/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      setJob({
+        id: "", kind: path, label: path, state: "failed", progress: "",
+        elapsed_seconds: 0,
+        error: typeof payload.detail === "string" ? payload.detail : `HTTP ${response.status}`,
+        result: null,
+      });
+      return;
+    }
+    setJob(payload as RunningJob);
+  }, []);
 
   return (
     <div className="system">
@@ -175,6 +226,59 @@ export function SystemPanel() {
               )}
             </tbody>
           </table>
+        </article>
+
+        <article className="block block-wide">
+          <header className="panel-header">
+            Operations
+            {job && (
+              <span
+                className={
+                  job.state === "running"
+                    ? "badge"
+                    : job.error || (job.result?.exit_code ?? 0) > 1
+                      ? "badge blocked"
+                      : "badge live"
+                }
+              >
+                {job.state === "running" ? job.progress || "running" : job.state}
+              </span>
+            )}
+          </header>
+
+          <div className="ops-actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={job?.state === "running"}
+              onClick={() => void start("ingest", { events: true, alerts: true, pause: 1.0 })}
+            >
+              <Icon name="refresh" /> Fetch today&apos;s data
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              disabled={job?.state === "running"}
+              onClick={() => void start("cycle", { top: 30 })}
+            >
+              Run a simulation cycle
+            </button>
+          </div>
+
+          <p className="block-note">
+            The ingest fetches whatever each feed is missing and refuses to ask for files
+            that are not published yet, so it is safe to press twice. A cycle trades the
+            latest session held; running it again on a session already traded does
+            nothing, which is what stops a double-press doubling the day&apos;s turnover.
+          </p>
+
+          {job?.error && <p className="analytics-note text-critical">{job.error}</p>}
+
+          {/* The command's own printed output. A job that says only "failed"
+              leaves the operator with nowhere to look. */}
+          {job?.result?.output && job.result.output.length > 0 && (
+            <pre className="ops-output">{job.result.output.join("\n")}</pre>
+          )}
         </article>
 
         <article className="block">

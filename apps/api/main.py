@@ -18,11 +18,6 @@ mode is "trading stopped when it need not have", which is recoverable.
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -37,8 +32,11 @@ from apps.api.auth import ReadAccess, WriteAccess
 from apps.api.book import DEFAULT_STATE_DIR, _latest_marks, build_book_router
 from apps.api.broker_keys import build_broker_keys_router
 from apps.api.candles import build_candles_router
+from apps.api.jobs import JobRunner
 from apps.api.journal import build_journal_router
 from apps.api.lab import build_lab_router
+from apps.api.lifespan import warm_backends
+from apps.api.operations import build_operations_router
 from apps.api.options import build_options_router
 from apps.api.research import build_research_router
 from apps.api.snapshot import book_snapshot
@@ -187,57 +185,6 @@ class KillResponse(BaseModel):
     operator: str
 
 
-#: uvicorn's own logger, not this module's.
-#:
-#: A module logger propagates to root, which uvicorn does not configure, so
-#: every message from it is dropped — and a warm-up that reports neither
-#: success nor failure is indistinguishable from one that never ran. This is
-#: the stream the operator is already reading.
-logger = logging.getLogger("uvicorn.error")
-
-
-@asynccontextmanager
-async def _warm_backends(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001 - lifespan signature
-    """Open the account database before the first request needs it.
-
-    The first connection to Atlas costs seconds — DNS and SRV resolution, TCP,
-    TLS, SCRAM and a verifying ping — and it is paid by whoever triggers it.
-    Left to the first request, that is the operator opening the console, who
-    sees a blank card for five seconds on a system that is otherwise answering
-    in milliseconds.
-
-    **On a thread, so the port binds immediately.** A synchronous warm here
-    would move the delay rather than remove it: uvicorn would not accept
-    connections until it finished, and a console that refuses to connect for
-    five seconds is worse than one that is briefly slow. The request path is
-    unchanged either way — it opens the cached client if this has finished, and
-    opens its own if it has not.
-
-    Failure is logged and not raised. An unreachable database is a state this
-    API is built to render, and refusing to start would remove the screen that
-    would have said so.
-    """
-
-    def warm() -> None:
-        started = time.perf_counter()
-        try:
-            from ops.mongo import mongo_available, warm_mongo_client  # noqa: PLC0415
-
-            if not mongo_available():
-                return
-            ok = warm_mongo_client()
-            logger.info(
-                "account database %s in %.2fs",
-                "ready" if ok else "unreachable",
-                time.perf_counter() - started,
-            )
-        except Exception:
-            logger.exception("could not warm the account database")
-
-    threading.Thread(target=warm, name="warm-accounts", daemon=True).start()
-    yield
-
-
 def create_app(
     engine: RiskEngine | None = None,
     alerts: AlertRouter | None = None,
@@ -257,7 +204,7 @@ def create_app(
         title="Neutron ops console",
         version="0.1.0",
         docs_url="/docs",
-        lifespan=_warm_backends,
+        lifespan=warm_backends,
     )
 
     # §13.7 binds this to 127.0.0.1, which is necessary and not sufficient. A
@@ -289,7 +236,11 @@ def create_app(
     # The slow research loop: backtests and the twelve-check gauntlet, which
     # take minutes and so run as jobs rather than as requests. Until this
     # existed the console could display research but could start none.
-    app.include_router(build_lab_router())
+    # One runner for every kind of background work, so `/lab/jobs` is the
+    # single place a console looks to find out what is running.
+    jobs = JobRunner()
+    app.include_router(build_lab_router(jobs))
+    app.include_router(build_operations_router(jobs))
     # What execution actually cost, against what the model charged. The cost
     # model had never been checked against anything but the curve it produced.
     app.include_router(build_journal_router())
