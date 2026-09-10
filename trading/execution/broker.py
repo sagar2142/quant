@@ -32,6 +32,7 @@ __all__ = [
     "BrokerAdapter",
     "BrokerError",
     "BrokerFill",
+    "BrokerFunds",
     "BrokerOrder",
     "BrokerPosition",
     "PaperBroker",
@@ -99,6 +100,34 @@ class BrokerPosition:
     average_price: Decimal
 
 
+@dataclass(frozen=True)
+class BrokerFunds:
+    """What the venue says is available, and what it says is committed.
+
+    **Every percentage limit in `RiskLimits` is a fraction of equity**, so this
+    is the number those limits are actually made of. Sized against a figure
+    somebody typed instead, `max_position_pct` and the drawdown ladder are
+    arithmetic on an invented denominator — they will pass or fail for reasons
+    unconnected to the account being traded.
+
+    `available` is what a new order may consume; `used` is margin already
+    committed. Their sum is not necessarily equity: unrealised profit on an
+    open position moves one venue's numbers and not another's, and this is
+    reported as each venue reports it rather than reconciled into a definition
+    no broker uses.
+    """
+
+    available: Decimal
+    used: Decimal
+    #: The venue's own word for this figure, kept so a screen can say where the
+    #: number came from rather than presenting every broker's arithmetic as one.
+    source: str = ""
+
+    @property
+    def total(self) -> Decimal:
+        return self.available + self.used
+
+
 @runtime_checkable
 class BrokerAdapter(Protocol):
     """What every venue must provide.
@@ -124,6 +153,15 @@ class BrokerAdapter(Protocol):
         """What the venue believes is held. The reconciliation baseline."""
 
     def fills_since(self, marker: str | None) -> list[BrokerFill]: ...
+
+    def funds(self) -> BrokerFunds:
+        """Cash the venue will let this account trade with.
+
+        Raises:
+            BrokerError: if the venue cannot say. Never a zero — a limit
+                computed against zero equity blocks every order, and a limit
+                computed against a guess is worse.
+        """
 
 
 @dataclass
@@ -259,6 +297,24 @@ class PaperBroker:
         if marker not in ids:
             return list(self._fills)
         return self._fills[ids.index(marker) + 1 :]
+
+    def funds(self) -> BrokerFunds:
+        """Refuses, because this broker does not hold the cash.
+
+        Raises:
+            BrokerError: always.
+
+        The simulated account's cash lives in `Portfolio`, which the cycle owns
+        and the console already reads. This class stands in for a *venue* — it
+        knows what it thinks is held and nothing about the balance behind it.
+        Returning zero here would be the worst option available: every
+        percentage limit is a fraction of equity, so a zero denominator blocks
+        every order while looking like an ordinary flat account.
+        """
+        raise BrokerError(
+            "the simulated broker holds no cash; the paper account's balance is in "
+            "Portfolio, not the venue"
+        )
 
     def inject_position(self, position: BrokerPosition) -> None:
         """Force a position, bypassing the order path.

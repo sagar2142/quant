@@ -519,3 +519,32 @@ class TestAlerting:
         AlertRouter([sink]).kill_switch(engaged=True, by="sagar", reason="test halt")
         assert "sagar" in captured[0].body
         assert captured[0].severity is Severity.CRITICAL
+
+
+class TestFunds:
+    """The denominator every percentage limit is made of — MASTER_PLAN §8."""
+
+    def test_the_simulated_broker_refuses_rather_than_returning_zero(self) -> None:
+        """A zero here blocks every order while looking like a flat account.
+
+        The paper account's cash lives in `Portfolio`; this class stands in for
+        a venue and knows only what it thinks is held.
+        """
+        from trading.execution.broker import BrokerError
+
+        broker = PaperBroker(INSTRUMENTS)
+        with pytest.raises(BrokerError, match="holds no cash"):
+            broker.funds()
+
+    def test_total_is_available_plus_committed(self) -> None:
+        from trading.execution.broker import BrokerFunds
+
+        found = BrokerFunds(available=Decimal("40000"), used=Decimal("10000"), source="x")
+        assert found.total == Decimal("50000")
+
+    def test_the_source_is_carried(self) -> None:
+        """A screen showing a real balance beside a simulated one needs to be
+        able to tell them apart, and this is the only field that can."""
+        from trading.execution.broker import BrokerFunds
+
+        assert BrokerFunds(Decimal(1), Decimal(0), "kite:equity").source == "kite:equity"

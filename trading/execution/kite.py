@@ -38,7 +38,13 @@ from core.config import settings
 from core.instruments import Instrument, InstrumentId
 from core.orders import OrderType, Side
 from core.secrets import BrokerCredentials
-from trading.execution.broker import BrokerError, BrokerFill, BrokerOrder, BrokerPosition
+from trading.execution.broker import (
+    BrokerError,
+    BrokerFill,
+    BrokerFunds,
+    BrokerOrder,
+    BrokerPosition,
+)
 from trading.execution.orders import Order, TradingMode
 
 __all__ = ["KITE_API_BASE", "KiteBroker"]
@@ -273,6 +279,38 @@ class KiteBroker:
             )
             for row in rows
         ]
+
+    def funds(self) -> BrokerFunds:
+        """Equity-segment margin, from Kite's own `/user/margins/equity`.
+
+        The `equity` segment specifically: Kite reports commodity separately,
+        and summing the two would let a commodity balance raise an equity
+        position limit.
+        """
+        client = self._http()
+        try:
+            response = client.get(f"{KITE_API_BASE}/user/margins/equity", headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise BrokerError(f"could not fetch funds: {exc}") from exc
+        finally:
+            if self.client is None:
+                client.close()
+
+        if response.status_code != httpx.codes.OK:
+            raise BrokerError(f"funds fetch failed: HTTP {response.status_code}")
+
+        data = response.json().get("data") or {}
+        available = (data.get("available") or {}).get("live_balance")
+        used = (data.get("utilised") or {}).get("debits")
+        if available is None:
+            # Refused rather than defaulted. A zero here blocks every order and
+            # looks like a flat account; a guess sizes real positions.
+            raise BrokerError("Kite returned no available balance")
+        return BrokerFunds(
+            available=Decimal(str(available)),
+            used=Decimal(str(used or 0)),
+            source="kite:equity",
+        )
 
     def positions(self) -> list[BrokerPosition]:
         """What Kite believes is held. The reconciliation baseline (§9)."""

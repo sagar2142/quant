@@ -47,7 +47,12 @@ from trading.risk.limits import PortfolioState, ProposedOrder
 if TYPE_CHECKING:  # pragma: no cover - types only; the runtime import is local
     from core.secrets import BrokerCredentials
     from data.store.sectors import SectorView
-    from trading.execution.broker import BrokerFill, BrokerOrder, BrokerPosition
+    from trading.execution.broker import (
+        BrokerFill,
+        BrokerFunds,
+        BrokerOrder,
+        BrokerPosition,
+    )
 
 __all__ = [
     "INDUSTRY_PREFIX",
@@ -171,6 +176,22 @@ class WorkingOrder(BaseModel):
     price: str | None
     status: str
     placed_at: str
+
+
+class FundsResponse(BaseModel):
+    """What the venue says this account can trade with.
+
+    Every percentage limit in `RiskLimits` is a fraction of equity, so this is
+    the denominator those limits are made of. Reported with its `source` so a
+    reader can tell a real balance from the simulated book's cash — presenting
+    both as one number is how a limit ends up sized against an invented
+    account.
+    """
+
+    available: str
+    used: str
+    total: str
+    source: str
 
 
 class HeldPosition(BaseModel):
@@ -674,6 +695,8 @@ class LiveBroker(Protocol):
 
     def fills_since(self, marker: str | None) -> list[BrokerFill]: ...
 
+    def funds(self) -> BrokerFunds: ...
+
 
 def _broker(session: str | None = None) -> LiveBroker:
     """A live broker, or an HTTP error explaining why there is not one.
@@ -750,6 +773,26 @@ def _held_positions(risk: RiskEngine, session: str | None = None) -> list[HeldPo
     ]
 
 
+def _account_funds(risk: RiskEngine, session: str | None = None) -> FundsResponse:
+    """The venue's own balance. Never defaulted when it cannot be read."""
+    _require_armed(risk)
+    from trading.execution.broker import BrokerError  # noqa: PLC0415
+
+    try:
+        found = _broker(session).funds()
+    except BrokerError as exc:
+        # 502, not a zero. A limit computed against zero equity blocks every
+        # order while looking like an ordinary flat account, and one computed
+        # against a guess sizes real positions on a number nobody supplied.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FundsResponse(
+        available=f"{found.available:.2f}",
+        used=f"{found.used:.2f}",
+        total=f"{found.total:.2f}",
+        source=found.source,
+    )
+
+
 def _executed_fills(risk: RiskEngine, session: str | None = None) -> list[ExecutedFill]:
     """Today's executions, as the venue reports them."""
     _require_armed(risk)
@@ -810,6 +853,11 @@ def build_trade_router(risk: RiskEngine) -> APIRouter:
     def positions(session: SessionCookie = None) -> list[HeldPosition]:
         """What the broker believes is held — the reconciliation baseline (§9)."""
         return _held_positions(risk, session)
+
+    @router.get("/funds", response_model=FundsResponse, dependencies=[ReadAccess])
+    def funds(session: SessionCookie = None) -> FundsResponse:
+        """The venue's balance — the denominator every percentage limit uses."""
+        return _account_funds(risk, session)
 
     @router.get("/fills", response_model=list[ExecutedFill], dependencies=[ReadAccess])
     def fills(session: SessionCookie = None) -> list[ExecutedFill]:

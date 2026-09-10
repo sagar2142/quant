@@ -40,7 +40,13 @@ from core.config import settings
 from core.instruments import Instrument, InstrumentId
 from core.orders import OrderType, Side
 from core.secrets import BrokerCredentials
-from trading.execution.broker import BrokerError, BrokerFill, BrokerOrder, BrokerPosition
+from trading.execution.broker import (
+    BrokerError,
+    BrokerFill,
+    BrokerFunds,
+    BrokerOrder,
+    BrokerPosition,
+)
 from trading.execution.groww_auth import GrowwAuthError, mint_access_token
 from trading.execution.orders import Order, TradingMode
 
@@ -385,6 +391,32 @@ class GrowwBroker:
             except (TypeError, ValueError):
                 continue
         return out
+
+    def funds(self) -> BrokerFunds:
+        """Available margin, from Groww's `/margins/detail/user`.
+
+        Groww nests the equity figures under their own keys and the shape has
+        moved before, so every one is read defensively and a missing available
+        balance is an error rather than a zero — a limit sized against zero
+        blocks everything, and one sized against a guess trades real money on
+        an invented denominator.
+        """
+        body = self._call("GET", "/margins/detail/user")
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+        if not isinstance(payload, dict):
+            raise BrokerError(f"Groww returned no margin detail: {body}")
+
+        equity = payload.get("equity_margin_details")
+        block = equity if isinstance(equity, dict) else payload
+        available = block.get("net_available_margin", block.get("available_margin"))
+        used = block.get("used_margin", block.get("utilised_margin"))
+        if available is None:
+            raise BrokerError(f"Groww returned no available margin: {sorted(block)}")
+        return BrokerFunds(
+            available=Decimal(str(available)),
+            used=Decimal(str(used or 0)),
+            source="groww:equity",
+        )
 
     def positions(self) -> list[BrokerPosition]:
         """What Groww believes is held. The reconciliation baseline (§9).
