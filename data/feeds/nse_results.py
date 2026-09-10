@@ -99,8 +99,13 @@ FUNDAMENTAL_FACTS: dict[str, str] = {
     "Income": "total_income",
     "ProfitBeforeTax": "profit_before_tax",
     "ProfitLossForPeriod": "net_profit",
-    "BasicEarningsLossPerShare": "eps_basic",
-    "DilutedEarningsLossPerShare": "eps_diluted",
+    # The full tag: Ind-AS emits no plain `BasicEarningsLossPerShare`, only the
+    # three qualified forms. The short name matched nothing and left the column
+    # null across 2,247 filings while revenue and profit filled correctly.
+    # Combined rather than continuing-only, because that is the headline EPS the
+    # price is quoted against.
+    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
+    "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
 }
 
 #: Keys the API response must carry. A layout change fails loudly rather than

@@ -64,7 +64,7 @@ XBRL = b"""<?xml version="1.0" encoding="UTF-8"?>
   <in-bse-fin:ProfitBeforeTax contextRef="OneD">36000000.00</in-bse-fin:ProfitBeforeTax>
   <in-bse-fin:ProfitBeforeTax contextRef="FourD">108000000.00</in-bse-fin:ProfitBeforeTax>
   <in-bse-fin:ProfitLossForPeriod contextRef="OneD">12800000.00</in-bse-fin:ProfitLossForPeriod>
-  <in-bse-fin:BasicEarningsLossPerShare contextRef="OneD">1.48</in-bse-fin:BasicEarningsLossPerShare>
+  <in-bse-fin:BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations contextRef="OneD">1.48</in-bse-fin:BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations>
 </xbrl>
 """
 

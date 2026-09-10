@@ -140,6 +140,32 @@ def _residual_expression(factor: Factor) -> pl.Expr:
 
     if factor is Factor.BETA:
         return -pl.col("beta")
+    if factor is Factor.EARNINGS_YIELD:
+        # E/P, not P/E. Inverted so the ranking is monotone and a loss-making
+        # name scores negative rather than producing a huge positive multiple,
+        # and so a near-zero denominator is the price -- which cannot be zero --
+        # rather than earnings, which routinely are.
+        #
+        # A stale filing is excluded rather than carried: an earnings yield
+        # built on figures nobody has confirmed in a year is a number about the
+        # past wearing the current price.
+        return (
+            pl.when(pl.col("filing_stale") | pl.col("close").is_null())
+            .then(None)
+            .otherwise(pl.col("eps_basic") / pl.col("close"))
+        )
+
+    if factor is Factor.NET_MARGIN:
+        # Revenue can be zero or negative on a real filing -- an NBFC booking a
+        # fair-value reversal does exactly that -- and dividing by it produces
+        # a number whose sign says nothing about quality. Excluded rather than
+        # clamped.
+        return (
+            pl.when(pl.col("filing_stale") | (pl.col("revenue") <= 0))
+            .then(None)
+            .otherwise(pl.col("net_profit") / pl.col("revenue"))
+        )
+
     if factor is Factor.RESIDUAL_MOMENTUM:
         # Cumulative residual return over the 12-1 window. Summed rather than
         # compounded: residuals are already excess of the market and small, and

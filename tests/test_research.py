@@ -158,6 +158,13 @@ class TestFactorConstruction:
         sessions = SEASONALITY_YEARS * 252 + 63
         frame = pl.concat([panel({f"N{i}": walk(sessions, seed=i)}) for i in range(4)])
         for factor in Factor:
+            if factor.needs_fundamentals:
+                # This fixture is a synthetic price panel and there is no
+                # filings store behind it, so a fundamental factor correctly
+                # scores nothing. Excluded by the property rather than by name,
+                # so a new one is covered the day it is added, and tested
+                # properly in `test_fundamental_factors.py`.
+                continue
             scored = build_factor(frame, FactorSpec(factor))
             assert not scored.is_empty(), factor.value
             assert scored["signal"].is_finite().all()
