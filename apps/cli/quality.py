@@ -28,6 +28,11 @@ from data.store.panel import PanelStore
 #: holds, so their data quality is the quality that matters.
 DEFAULT_SAMPLE = 10
 
+#: Names the sector classification is expected to cover. The most liquid ones,
+#: for the same reason the bar sample uses them: a classification that misses a
+#: name nothing can trade has not missed anything that matters.
+TRADED_UNIVERSE = 300
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Data quality report for the NSE panel")
@@ -83,9 +88,46 @@ def run(argv: list[str] | None = None) -> int:
         print()
         critical += report.critical_count
 
+    # The feeds that are not bars. Checked here rather than in their own
+    # command because a gate an operator has to remember to run twice is a gate
+    # that gets run once.
+    critical += _check_stores(args, panel)
+
     verdict = "CLEAN" if critical == 0 else f"{critical} CRITICAL finding(s)"
     print(f"-- quality gate: {verdict}")
     return 1 if critical else 0
+
+
+def _check_stores(args: argparse.Namespace, panel: pl.DataFrame) -> int:
+    """Sectors, quarterly results and the announced calendar.
+
+    Every branch of the research now reads one of these, and none of them was
+    covered by a gate that only ever looked at bars.
+    """
+    from data.quality.stores import check_events, check_fundamentals, check_sectors  # noqa: PLC0415
+
+    lake = args.lake if args.lake is not None else settings.lake
+
+    # Coverage is judged against what is liquid enough to hold, not against the
+    # whole panel: most of it is too thin to trade, and counting those names
+    # would make an adequate classification look broken.
+    traded = (
+        panel.with_columns((pl.col("close") * pl.col("volume")).alias("value"))
+        .group_by("instrument_id")
+        .agg(pl.col("value").median().alias("median_value"))
+        .sort("median_value", descending=True)
+        .head(TRADED_UNIVERSE)["instrument_id"]
+        .to_list()
+    )
+    universe = {str(i).split(":", 1)[-1] for i in traded}
+
+    critical = 0
+    print()
+    for report in (check_sectors(lake, universe), check_fundamentals(lake), check_events(lake)):
+        print(report.format())
+        print()
+        critical += report.critical_count
+    return critical
 
 
 if __name__ == "__main__":
