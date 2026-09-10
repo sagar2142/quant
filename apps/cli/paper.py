@@ -30,7 +30,12 @@ from pathlib import Path
 import polars as pl
 
 from apps.cli.backtest import build_universe, load_panel, nse_instrument
-from apps.cli.paper_market import latest_marks, latest_view, trailing_adv
+from apps.cli.paper_market import (
+    announced_results,
+    latest_marks,
+    latest_view,
+    trailing_adv,
+)
 from core.clock import utc_now
 from core.config import settings
 from core.instruments import Instrument, InstrumentId
@@ -208,6 +213,10 @@ def run_cycle_for(
             weights=weights.weights,
             marks={k: v for k, v in marks.items() if k in instruments},
             adv=trailing_adv(history),
+            # The announced calendar, so the risk engine can refuse to add risk
+            # into a scheduled event. Absent leaves every order unmeasured
+            # rather than clear -- the same distinction the alert rules draw.
+            days_to_results=announced_results(args, history),
             # Correlation groups over the traded universe. `max_cluster_pct`
             # has been configured and enforced since the risk engine was
             # written, and was skipped on every order ever placed because

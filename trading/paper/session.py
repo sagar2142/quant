@@ -77,6 +77,12 @@ class CycleInputs:
     #: cycle before this existed: `max_cluster_pct` was configured, enforced and
     #: never once evaluated, because nothing ever set a cluster to check.
     clusters: dict[InstrumentId, str] = field(default_factory=dict)
+    #: Sessions until each name's announced results meeting, where known.
+    #:
+    #: Absent means the calendar could not answer for that name -- not that
+    #: nothing is announced. The two are opposite findings and the risk engine
+    #: reports the first as unmeasured rather than clear.
+    days_to_results: dict[InstrumentId, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -223,7 +229,9 @@ class PaperSession:
         for instrument_id, delta in deltas:
             price = inputs.marks[instrument_id]
             state = self._risk_state(portfolio, inputs, opening_equity, peak, in_flight)
-            proposed = self._proposed(instrument_id, delta, price, inputs.clusters)
+            proposed = self._proposed(
+                instrument_id, delta, price, inputs.clusters, inputs.days_to_results
+            )
             verdict = self.risk.check(proposed, state)
             if not verdict.allowed:
                 report.blocked.append(BlockedOrder(instrument_id, delta, verdict))
@@ -246,6 +254,7 @@ class PaperSession:
         delta: Decimal,
         price: Decimal,
         clusters: dict[InstrumentId, str],
+        days_to_results: dict[InstrumentId, int],
     ) -> ProposedOrder:
         instrument = self.instruments[instrument_id]
         return ProposedOrder(
@@ -255,6 +264,7 @@ class PaperSession:
             price=price,
             multiplier=instrument.multiplier,
             cluster=clusters.get(instrument_id, ""),
+            days_to_results=days_to_results.get(instrument_id),
         )
 
     def _risk_state(

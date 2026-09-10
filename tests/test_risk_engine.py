@@ -422,3 +422,76 @@ class TestFormatting:
             ),
         )
         assert "ladder scale" in verdict.format()
+
+
+class TestEventBlackout:
+    """Do not add risk into a scheduled event — MASTER_PLAN §8.
+
+    An earnings print is the one move whose timing is known in advance and
+    whose size is not. Every volatility estimate here is built from history,
+    and history is mostly sessions where nothing was scheduled.
+    """
+
+    def order(self, days, quantity=Decimal(10)):
+        return ProposedOrder(
+            strategy_id="s",
+            instrument_id=InstrumentId("NSE:INE002A01018"),
+            quantity=quantity,
+            price=Decimal(100),
+            days_to_results=days,
+        )
+
+    def state(self, held=Decimal(0)):
+        return PortfolioState(
+            equity=Decimal(1_000_000),
+            cash=Decimal(1_000_000),
+            peak_equity=Decimal(1_000_000),
+            day_start_equity=Decimal(1_000_000),
+            positions={InstrumentId("NSE:INE002A01018"): held} if held else {},
+        )
+
+    def check_named(self, verdict):
+        return next(c for c in verdict.checks if c.name == "event_blackout")
+
+    def test_opening_inside_the_window_is_refused(self) -> None:
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        found = self.check_named(engine.check(self.order(1), self.state()))
+        assert not found.passed
+
+    def test_outside_the_window_is_allowed(self) -> None:
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        assert self.check_named(engine.check(self.order(9), self.state())).passed
+
+    def test_reducing_into_an_event_is_always_allowed(self) -> None:
+        """A rule that blocked this would trap a book in the position it was
+        trying to leave, which is the opposite of a risk control."""
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        selling = self.order(1, quantity=Decimal(-5))
+        found = self.check_named(engine.check(selling, self.state(held=Decimal(100_000))))
+        assert found.passed
+
+    def test_adding_to_an_existing_position_is_refused(self) -> None:
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        found = self.check_named(engine.check(self.order(1), self.state(held=Decimal(50_000))))
+        assert not found.passed
+
+    def test_an_unknown_calendar_is_unmeasured_not_clear(self) -> None:
+        """`observed=None` is what the console renders as an em dash: this
+        order was not checked, rather than checked and found clear."""
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        found = self.check_named(engine.check(self.order(None), self.state()))
+        assert found.passed
+        assert found.observed is None
+        assert "not checked" in found.message
+
+    def test_the_check_is_absent_when_disabled(self) -> None:
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=0))
+        verdict = engine.check(self.order(1), self.state())
+        assert all(c.name != "event_blackout" for c in verdict.checks)
+
+    def test_the_boundary_day_is_still_blocked(self) -> None:
+        """Two sessions, not one: a print moves the open, and this system
+        decides on a close and fills on the next bar."""
+        engine = RiskEngine(limits=RiskLimits(event_blackout_days=2))
+        assert not self.check_named(engine.check(self.order(2), self.state())).passed
+        assert self.check_named(engine.check(self.order(3), self.state())).passed

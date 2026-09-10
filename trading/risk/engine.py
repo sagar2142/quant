@@ -30,9 +30,11 @@ from trading.risk.limits import (
     DrawdownLadder,
     PortfolioState,
     ProposedOrder,
+    RiskCheck,
     RiskDecision,
     RiskLimits,
 )
+from trading.risk.portfolio_checks import cluster_check, event_check
 
 __all__ = ["KillSwitchEngagedError", "RiskCheck", "RiskEngine", "RiskVerdict"]
 
@@ -42,37 +44,6 @@ class KillSwitchEngagedError(RuntimeError):
 
     def __init__(self, reason: str, engaged_by: str, at: datetime) -> None:
         super().__init__(f"kill switch engaged by {engaged_by} at {at.isoformat()}: {reason}")
-
-
-@dataclass(frozen=True)
-class RiskCheck:
-    """One limit, evaluated."""
-
-    name: str
-    passed: bool
-    observed: Decimal | None = None
-    threshold: Decimal | None = None
-    message: str = ""
-    #: Whether the limit was actually evaluated against a number.
-    #:
-    #: A check can allow an order without having measured anything — the
-    #: liquidity limit deliberately lets a fresh listing through, because
-    #: blocking every instrument with no ADV history would be wrong. But
-    #: reporting that as "ok" is the failure this console has been chasing all
-    #: along: it renders identically to a limit that was checked and cleared,
-    #: so nobody can tell protection from its absence.
-    measured: bool = True
-
-    def format(self) -> str:
-        if not self.measured:
-            return f"    [ --  ] {self.name:<24} {self.message}"
-        mark = "ok  " if self.passed else "FAIL"
-        if self.observed is None:
-            return f"    [{mark}] {self.name:<24} {self.message}"
-        return (
-            f"    [{mark}] {self.name:<24} {self.observed:>14,.2f} "
-            f"vs {self.threshold:>14,.2f}  {self.message}"
-        )
 
 
 @dataclass(frozen=True)
@@ -330,28 +301,10 @@ class RiskEngine:
             ),
         ]
         if order.cluster:
-            checks.append(self._cluster_check(order, state))
+            checks.append(cluster_check(order, state, self.limits))
+        if limits.event_blackout_days > 0:
+            checks.append(event_check(order, state, self.limits))
         return checks
-
-    def _cluster_check(self, order: ProposedOrder, state: PortfolioState) -> RiskCheck:
-        """Correlated names count as one bet.
-
-        Ten positions in correlated PSU banks is a single bet with ten tickers.
-        A gross-exposure limit sees diversification that is not there; this
-        check sees the bet.
-        """
-        current = state.clusters.get(order.cluster, Decimal(0))
-        resulting = abs(current + order.signed_notional) / state.equity
-        return RiskCheck(
-            "cluster_concentration",
-            passed=resulting <= self.limits.max_cluster_pct,
-            observed=resulting,
-            threshold=self.limits.max_cluster_pct,
-            # The label carries its own namespace — "corr:" or "industry:" — so
-            # a breach says which grouping decided rather than leaving the
-            # reader to guess which of the two produced it.
-            message=f"group '{order.cluster or 'none'}' as a fraction of NAV",
-        )
 
     # ── layer 3 ─────────────────────────────────────────────────────────────
 

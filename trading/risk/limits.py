@@ -34,6 +34,7 @@ __all__ = [
     "LadderRung",
     "PortfolioState",
     "ProposedOrder",
+    "RiskCheck",
     "RiskDecision",
     "RiskLimits",
 ]
@@ -49,6 +50,37 @@ class RiskDecision(str, Enum):
 
 
 @dataclass(frozen=True)
+class RiskCheck:
+    """One limit, evaluated."""
+
+    name: str
+    passed: bool
+    observed: Decimal | None = None
+    threshold: Decimal | None = None
+    message: str = ""
+    #: Whether the limit was actually evaluated against a number.
+    #:
+    #: A check can allow an order without having measured anything — the
+    #: liquidity limit deliberately lets a fresh listing through, because
+    #: blocking every instrument with no ADV history would be wrong. But
+    #: reporting that as "ok" is the failure this console has been chasing all
+    #: along: it renders identically to a limit that was checked and cleared,
+    #: so nobody can tell protection from its absence.
+    measured: bool = True
+
+    def format(self) -> str:
+        if not self.measured:
+            return f"    [ --  ] {self.name:<24} {self.message}"
+        mark = "ok  " if self.passed else "FAIL"
+        if self.observed is None:
+            return f"    [{mark}] {self.name:<24} {self.message}"
+        return (
+            f"    [{mark}] {self.name:<24} {self.observed:>14,.2f} "
+            f"vs {self.threshold:>14,.2f}  {self.message}"
+        )
+
+
+@dataclass(frozen=True)
 class ProposedOrder:
     """An order the risk engine is being asked to approve."""
 
@@ -60,6 +92,13 @@ class ProposedOrder:
     multiplier: Decimal = Decimal(1)
     #: Correlation group. Names sharing one count as a single bet.
     cluster: str = ""
+    #: Sessions until this name's announced results meeting, when one is known.
+    #:
+    #: `None` is "not measured", not "nothing announced" — the calendar may be
+    #: absent, stale, or unable to resolve the symbol, and a check that treated
+    #: those as "no event" would wave through exactly the order it exists to
+    #: catch. The engine reports it as unmeasured instead.
+    days_to_results: int | None = None
 
     def __post_init__(self) -> None:
         if self.quantity == 0:
@@ -152,6 +191,23 @@ class RiskLimits:
     daily_loss_limit_pct: Decimal = Decimal("-0.03")
     #: Order may not exceed this fraction of the instrument's ADV.
     max_adv_participation: Decimal = Decimal("0.05")
+
+    #: Sessions before an announced results meeting during which a position may
+    #: not be *increased*. Zero disables the check.
+    #:
+    #: **Only increases.** Reducing or closing into an event is always allowed,
+    #: and a rule that blocked it would trap a book in the position it was
+    #: trying to get out of — the opposite of a risk control.
+    #:
+    #: Two sessions rather than the day itself: a results print moves the open,
+    #: so an order placed the evening before is already exposed. This system
+    #: decides on a close and fills on the next bar, which spends one of them.
+    #:
+    #: The reason this is a limit and not a strategy's business: an earnings
+    #: gap is not the volatility GARCH forecasts from history. The forecast is
+    #: built from sessions where nothing was scheduled, so it understates a day
+    #: whose distribution is known in advance to be bimodal.
+    event_blackout_days: int = 2
 
     def __post_init__(self) -> None:
         if self.daily_loss_limit_pct >= 0:

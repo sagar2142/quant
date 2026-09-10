@@ -12,16 +12,25 @@ argument parsing is how a test ends up asserting on a `Namespace`.
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, time
 from decimal import Decimal
+from pathlib import Path
 
 import polars as pl
 
-from core.clock import UTC, as_decision_time
+from core.clock import UTC, as_decision_time, utc_now
+from core.config import settings
 from core.instruments import InstrumentId
 from quant.strategies.base import MarketView
 
-__all__ = ["ADV_WINDOW", "latest_marks", "latest_view", "trailing_adv"]
+__all__ = [
+    "ADV_WINDOW",
+    "announced_results",
+    "latest_marks",
+    "latest_view",
+    "trailing_adv",
+]
 
 #: Trailing window for average daily traded value, matching the risk limits.
 ADV_WINDOW = 20
@@ -57,3 +66,42 @@ def trailing_adv(history: pl.DataFrame) -> dict[InstrumentId, Decimal]:
         for i, v in zip(value["instrument_id"], value["traded"], strict=True)
         if v is not None and v > 0
     }
+
+
+#: How far ahead the results calendar is read for the blackout check.
+RESULTS_HORIZON = 30
+
+#: A calendar older than this is treated as no calendar. It reports quiet it
+#: cannot vouch for, and clearing an order against a fortnight-old file is
+#: worse than leaving it unmeasured.
+STALE_CALENDAR_DAYS = 7
+
+
+def announced_results(
+    args: argparse.Namespace,
+    history: pl.DataFrame,  # noqa: ARG001 - symmetry with the others
+) -> dict[InstrumentId, int]:
+    """Sessions until each name reports, where the calendar knows.
+
+    Read here rather than inside the cycle so `PaperSession` stays a pure
+    function of its inputs. A name the calendar cannot answer for is absent
+    rather than zero, and the risk engine reports that as unmeasured.
+    """
+    from data.store.events import EventStore  # noqa: PLC0415
+
+    lake = Path(args.lake) if args.lake else settings.lake
+    today = utc_now().date()
+    window = EventStore(lake).upcoming(today, within_days=RESULTS_HORIZON, results_only=True)
+    if window.observed_at is None or window.age_days > STALE_CALENDAR_DAYS:
+        return {}
+
+    found: dict[InstrumentId, int] = {}
+    for row in window.rows.iter_rows(named=True):
+        instrument_id = row.get("instrument_id")
+        if not instrument_id:
+            continue
+        ahead = (row["event_date"] - today).days
+        key = InstrumentId(str(instrument_id))
+        if key not in found or ahead < found[key]:
+            found[key] = ahead
+    return found

@@ -390,7 +390,7 @@ class TestHeldNamesStayMarkable:
             )
         )
 
-        args = argparse.Namespace(lookback=60, skip=5, gross=Decimal("0.9"), top=1)
+        args = argparse.Namespace(lookback=60, skip=5, gross=Decimal("0.9"), top=1, lake=None)
         # The universe contains only the ranked name; the held one has dropped.
         report = run_cycle_for(state, history, (InstrumentId(ranked),), args)
         assert report is not None
