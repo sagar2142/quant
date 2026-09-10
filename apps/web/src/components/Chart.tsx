@@ -70,6 +70,21 @@ export interface ChartProps {
 /** Fraction of the pane given to volume. */
 const VOLUME_SHARE = 0.22;
 const PADDING = { top: 8, right: 62, bottom: 20, left: 8 };
+
+//: Widest a single candle may be drawn, in pixels.
+//:
+//: Reached only when a range holds fewer bars than the pane could show. Wide
+//: enough that one session is still legible as a candle, narrow enough that it
+//: never reads as a filled rectangle.
+const MAX_SLOT = 22;
+
+//: What each window is conventionally read as. Shown on hover, because a
+//: coloured label is an identifier and not an explanation.
+const MA_MEANING: Record<number, string> = {
+  20: "roughly one trading month, the short-term trend.",
+  50: "roughly one quarter, the medium-term trend traders watch for crossovers.",
+  200: "roughly one year, the line most often used to call a bull or bear market.",
+};
 /** Fewest candles a zoom may show, so the view cannot collapse to nothing. */
 const MIN_VISIBLE = 12;
 
@@ -297,7 +312,12 @@ export function Chart({
       }
       return PADDING.top + priceH - ((price - low) / (high - low)) * priceH;
     };
-    const slot = plotW / visible.length;
+    // Capped, not just divided. A range shorter than the interval leaves very
+    // few candles -- 1D on daily bars leaves exactly one -- and dividing the
+    // width among them draws a single body across the whole pane. It is not
+    // wrong so much as unreadable: a wall of colour that looks like a rendering
+    // fault rather than one session. Bars stay a sane width and sit at the left.
+    const slot = Math.min(plotW / visible.length, MAX_SLOT);
     const toX = (index: number): number => PADDING.left + (index - from) * slot + slot / 2;
 
     // ── grid and price axis ────────────────────────────────────────────────
@@ -404,6 +424,23 @@ export function Chart({
       ctx.lineTo(width - PADDING.right, Math.round(hover.y) + 0.5);
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // The date under the cursor, on the axis. The readout above the chart
+      // carries it too, but reading a value there means looking away from the
+      // bar being pointed at -- which is the whole action being performed.
+      const stamp = candles[hover.index];
+      if (stamp) {
+        const text = stamp.date.includes("T")
+          ? stamp.date.replace("T", " ").slice(0, 16)
+          : stamp.date.slice(0, 10);
+        const w = ctx.measureText(text).width;
+        const boxX = Math.min(Math.max(x - w / 2 - 4, 2), width - PADDING.right - w - 8);
+        ctx.fillStyle = CROSSHAIR;
+        ctx.fillRect(boxX, height - PADDING.bottom + 2, w + 8, 14);
+        ctx.fillStyle = GRID;
+        ctx.fillText(text, boxX + 4, height - 6);
+        ctx.fillStyle = AXIS;
+      }
     }
   }, [candles, view, hover, averages, height, logScale]);
 
@@ -533,11 +570,24 @@ export function Chart({
           </span>
         )}
         <span className="chart-legend">
-          {overlays.map((w, i) => (
-            <span key={w} style={{ color: OVERLAY_COLOURS[i % OVERLAY_COLOURS.length] }}>
-              MA{w}
-            </span>
-          ))}
+          {overlays.map((w, i) => {
+            // The current value beside the label, and what the label means on
+            // hover. A coloured "MA20" alone tells a reader which line is
+            // which and nothing about where it is -- which is the question
+            // being asked when someone looks at a moving average.
+            const line = averages[w];
+            const value = hover ? line?.[hover.index] : line?.[line.length - 1];
+            return (
+              <span
+                key={w}
+                style={{ color: OVERLAY_COLOURS[i % OVERLAY_COLOURS.length] }}
+                title={`${w}-session simple moving average of the close. Price above it is strength over that window, below it weakness; ${MA_MEANING[w] ?? "a longer window is a slower trend."}`}
+              >
+                MA{w}
+                {value != null && Number.isFinite(value) ? ` ${value.toFixed(2)}` : ""}
+              </span>
+            );
+          })}
         </span>
       </div>
       <div

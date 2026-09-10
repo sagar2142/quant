@@ -48,6 +48,15 @@ export interface WatchlistProps {
   onPick: (symbol: string) => void;
 }
 
+//: Traded value in the units an Indian desk actually speaks: crore above a
+//: crore, lakh below it. A raw rupee figure with nine digits is unreadable at
+//: the size this list renders.
+function advLabel(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value >= 1e7) return `${(value / 1e7).toFixed(1)} Cr`;
+  return `${(value / 1e5).toFixed(1)} L`;
+}
+
 export function Watchlist({ active, venue, onPick }: WatchlistProps) {
   const [symbols, setSymbols] = useState<string[]>(loadSymbols);
   const [rows, setRows] = useState<Row[]>([]);
@@ -78,6 +87,33 @@ export function Watchlist({ active, venue, onPick }: WatchlistProps) {
       cancelled = true;
     };
   }, [symbols, venue]);
+
+  //: Suggestions for the add box, from the same endpoint the header search
+  //: uses. Typing a symbol from memory works and always did; the point is that
+  //: a name half-remembered is now findable, and a typo produces no match here
+  //: instead of an invisible row in the saved list.
+  const [suggestions, setSuggestions] = useState<{ symbol: string; adv: number }[]>([]);
+
+  useEffect(() => {
+    const query = adding.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    // Debounced for the same reason the header search is: a request per
+    // keystroke puts a panel-wide ranking behind every letter.
+    const timer = setTimeout(() => {
+      fetch(`/api/symbols?q=${encodeURIComponent(query)}&venue=${encodeURIComponent(venue)}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((rows) => !cancelled && setSuggestions(Array.isArray(rows) ? rows.slice(0, 8) : []))
+        .catch(() => !cancelled && setSuggestions([]));
+    }, 140);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [adding, venue]);
 
   const add = useCallback(() => {
     const symbol = adding.trim().toUpperCase();
@@ -137,11 +173,39 @@ export function Watchlist({ active, venue, onPick }: WatchlistProps) {
         )}
       </ul>
       <div className="watch-add">
+        {suggestions.length > 0 && (
+          <ul className="watch-suggest">
+            {suggestions.map((match) => (
+              <li key={match.symbol}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSymbols((prev) =>
+                      prev.includes(match.symbol) ? prev : [...prev, match.symbol],
+                    );
+                    setAdding("");
+                    setSuggestions([]);
+                  }}
+                >
+                  <b>{match.symbol}</b>
+                  {/* Traded value, not a company name -- the endpoint carries
+                      no name, and liquidity is the number that separates a
+                      real listing from a thin lookalike with a similar
+                      ticker. */}
+                  <em>{advLabel(match.adv)}</em>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <input
           value={adding}
           placeholder="Add symbol"
           onChange={(event) => setAdding(event.target.value)}
-          onKeyDown={(event) => event.key === "Enter" && add()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") add();
+            if (event.key === "Escape") setSuggestions([]);
+          }}
           spellCheck={false}
         />
         <button type="button" className="ghost" onClick={add}>

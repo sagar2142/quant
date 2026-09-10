@@ -948,6 +948,59 @@ table.grid td:first-child {
   padding: var(--space-2);
 }
 
+/* Suggestions above the add box, not below it: the box sits at the bottom of
+   the rail, so a list dropping downward would open off-screen. */
+.watch-suggest {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  bottom: 100%;
+  left: var(--space-2);
+  list-style: none;
+  margin: 0 0 var(--space-1);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 0;
+  position: absolute;
+  right: var(--space-2);
+  z-index: 20;
+}
+
+.watch-suggest button {
+  background: none;
+  border: 0;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  text-align: left;
+  width: 100%;
+}
+
+.watch-suggest button:hover,
+.watch-suggest button:focus-visible {
+  background: var(--surface-sunken);
+}
+
+.watch-suggest b {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.watch-suggest em {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch-add {
+  position: relative;
+}
+
 /* ── the account menu ──────────────────────────────────────────────────────
    A list of destinations, in the shape every desktop tool settles on. */
 
