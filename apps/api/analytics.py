@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import numpy as np
+import numpy.typing as npt
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -65,6 +67,22 @@ SUGGESTIONS = 8
 
 #: A cross-section is a comparison; one name is a security screen.
 MIN_CROSS_SECTION = 2
+
+#: Symbols accepted by the pairs screen.
+#:
+#: Lower than `MAX_SYMBOLS` because every unordered pair is tested and the count
+#: is quadratic: twenty names is 190 regressions, forty would be 780. It is also
+#: a research limit rather than a performance one — searching a larger set makes
+#: a spurious cointegration near-certain, and the trial count is the thing that
+#: has to be declared.
+MAX_PAIR_SYMBOLS = 20
+
+#: Sessions a name needs before it can be tested for cointegration.
+#:
+#: An ADF on a short series has almost no power, so a shorter name is excluded
+#: rather than tested and reported as "not cointegrated" — that verdict would
+#: be a statement about the sample rather than the pair.
+MIN_PAIR_OBSERVATIONS = 120
 
 #: Trailing window used to rank the symbol search by liquidity.
 LIQUIDITY_WINDOW = 60
@@ -529,6 +547,137 @@ def _register_watchlist(router: APIRouter) -> None:
         return rows
 
 
+class PairRow(BaseModel):
+    """One pair, tested for a stationary spread."""
+
+    a: str
+    b: str
+    cointegrated: bool
+    #: Cointegrated *and* reverting fast enough to pay for the round trip.
+    tradable: bool
+    hedge_ratio: float
+    intercept: float
+    adf_pvalue: float
+    half_life_bars: float | None
+    correlation: float
+    observations: int
+    #: Why `cointegrated` is what it is, and the field to read when the two
+    #: look inconsistent. The verdict needs ADF *and* KPSS to agree, so a
+    #: spread can reject the unit root at 5% and still land INCONCLUSIVE —
+    #: which is not a pair. One test alone would call it one.
+    spread_verdict: str
+    #: Where the spread sits now, in standard deviations of its own history.
+    #: The entry signal: a pair can be cointegrated and have nothing to do.
+    spread_z: float | None
+
+
+class PairsResponse(BaseModel):
+    sessions: int
+    tested: int
+    rows: list[PairRow]
+    note: str
+
+
+def _register_pairs(router: APIRouter) -> None:
+    @router.get("/pairs", response_model=PairsResponse, dependencies=[ReadAccess])
+    def pairs(
+        symbols: str = Query(..., description="Comma-separated symbols, every pair tested"),
+        sessions: int = Query(750, ge=60),
+        venue: str = Query(DEFAULT_VENUE),
+    ) -> PairsResponse:
+        """Which of these names share a stationary spread.
+
+        **The one strategy family the console could not reach.** Engle-Granger,
+        the hedge ratio and the spread have been built and tested since the
+        maths went in, and nothing outside a test had ever called them — a
+        whole class of trade was library-only.
+
+        Every unordered pair is tested rather than a chosen few, because which
+        pair cointegrates is exactly what is not known in advance; the
+        combinatorics are why the symbol list is capped.
+
+        Ordered by p-value, but read `tradable` rather than `cointegrated`: a
+        spread whose half-life exceeds a quarter of the sample cannot be
+        verified inside it, and one that takes a year to close is a directional
+        position wearing a pairs-trade label.
+
+        A low ADF p-value beside `cointegrated: false` is not a contradiction.
+        The verdict needs ADF and KPSS to agree, and a spread that rejects the
+        unit root while KPSS also rejects stationarity is INCONCLUSIVE — which
+        is not a pair. `spread_verdict` carries that reasoning.
+        """
+        from itertools import combinations  # noqa: PLC0415
+
+        from quant.math.timeseries.cointegration import (  # noqa: PLC0415
+            engle_granger,
+            spread_series,
+        )
+
+        wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()][:MAX_PAIR_SYMBOLS]
+        if len(wanted) < MIN_CROSS_SECTION:
+            raise HTTPException(status_code=422, detail="a pair needs 2+ symbols")
+
+        history = _windowed(_panel(_venue(venue)), sessions)
+        actions = load_actions(history, wanted)
+        closes: dict[str, npt.NDArray[np.float64]] = {}
+        for symbol in wanted:
+            frame = series_for(history, symbol, actions)
+            if frame.height >= MIN_PAIR_OBSERVATIONS:
+                closes[symbol] = frame["close"].to_numpy()
+
+        if len(closes) < MIN_CROSS_SECTION:
+            raise HTTPException(
+                status_code=404,
+                detail=f"fewer than two of those have {MIN_PAIR_OBSERVATIONS}+ sessions",
+            )
+
+        rows: list[PairRow] = []
+        for first, second in combinations(sorted(closes), 2):
+            left, right = closes[first], closes[second]
+            width = min(left.size, right.size)
+            left, right = left[-width:], right[-width:]
+            try:
+                report = engle_granger(left, right)
+            except (ValueError, ZeroDivisionError):
+                continue
+
+            spread = spread_series(left, right, report.hedge_ratio, report.intercept)
+            deviation = float(np.std(spread, ddof=1)) if spread.size > 1 else 0.0
+            # None, not zero: a spread with no dispersion has no z-score, and
+            # zero would read as "sitting exactly on its mean".
+            z = float((spread[-1] - np.mean(spread)) / deviation) if deviation > 0 else None
+            half_life = report.half_life_bars if np.isfinite(report.half_life_bars) else None
+            rows.append(
+                PairRow(
+                    a=first,
+                    b=second,
+                    cointegrated=report.cointegrated,
+                    tradable=report.tradable,
+                    hedge_ratio=report.hedge_ratio,
+                    intercept=report.intercept,
+                    adf_pvalue=report.adf_pvalue,
+                    half_life_bars=half_life,
+                    correlation=report.correlation,
+                    observations=report.observations,
+                    spread_verdict=report.spread_verdict.value,
+                    spread_z=z,
+                )
+            )
+
+        rows.sort(key=lambda r: (not r.tradable, r.adf_pvalue))
+        tradable = sum(1 for r in rows if r.tradable)
+        return PairsResponse(
+            sessions=sessions,
+            tested=len(rows),
+            rows=rows,
+            note=(
+                f"{len(rows)} pair(s) tested, {tradable} tradable. Cointegration found by "
+                "searching every pair is the textbook case of a result that needs its "
+                "trial count declared before it is believed."
+            ),
+        )
+
+
 def _register_cross_section(router: APIRouter) -> None:
     @router.get("/crosssection", response_model=CrossSectionResponse, dependencies=[ReadAccess])
     def crosssection(
@@ -668,5 +817,6 @@ def build_analytics_router() -> APIRouter:
     _register_quote(router)
     _register_watchlist(router)
     _register_cross_section(router)
+    _register_pairs(router)
     _register_screen(router)
     return router

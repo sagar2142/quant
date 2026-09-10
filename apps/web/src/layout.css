@@ -931,6 +931,23 @@ table.grid td:first-child {
   white-space: pre-wrap;
 }
 
+/* Wide tables scroll in their own container; the page never does. */
+.scroll-x {
+  overflow-x: auto;
+}
+
+.analytics-input {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  flex: 1 1 22ch;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-width: 0;
+  padding: var(--space-2);
+}
+
 /* ── the account menu ──────────────────────────────────────────────────────
    A list of destinations, in the shape every desktop tool settles on. */
 
