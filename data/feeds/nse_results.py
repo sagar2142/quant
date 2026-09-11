@@ -49,16 +49,23 @@ propagate into every factor built on it.
 from __future__ import annotations
 
 import json
-import logging
-from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import polars as pl
-from lxml import etree
 
 from core.clock import UTC
+
+# Re-exported: the document parser moved to `nse_xbrl`, and callers that have
+# always imported it from here should not have to learn which file it is in.
+from data.feeds.nse_xbrl import (
+    FUNDAMENTAL_FACTS,
+    QUARTER_CONTEXT,
+    ResultsFormatError,
+    XbrlFacts,
+    parse_xbrl,
+    xbrl_is_plausible,
+)
 
 __all__ = [
     "FILING_SCHEMA",
@@ -74,39 +81,8 @@ __all__ = [
     "xbrl_is_plausible",
 ]
 
-logger = logging.getLogger(__name__)
 
 _BASE = "https://www.nseindia.com/api/corporates-financial-results"
-
-#: Context id prefix holding the reporting period itself.
-#:
-#: The Ind-AS taxonomy numbers its periods: `One` is the current quarter, `Four`
-#: the year-to-date. They are *not* distinguishable by their declared dates —
-#: see the module docstring — so this prefix is the only reliable selector.
-QUARTER_CONTEXT = "One"
-
-#: The cumulative context, named so the guard below can say what it rejected.
-CUMULATIVE_CONTEXT = "Four"
-
-#: Facts worth extracting, mapped to the column they become.
-#:
-#: Deliberately small. Every one of these appears in the standard Ind-AS
-#: statement of profit and loss, so a name missing one is a real gap rather
-#: than a taxonomy variant, and there is no temptation to infer it.
-FUNDAMENTAL_FACTS: dict[str, str] = {
-    "RevenueFromOperations": "revenue",
-    "OtherIncome": "other_income",
-    "Income": "total_income",
-    "ProfitBeforeTax": "profit_before_tax",
-    "ProfitLossForPeriod": "net_profit",
-    # The full tag: Ind-AS emits no plain `BasicEarningsLossPerShare`, only the
-    # three qualified forms. The short name matched nothing and left the column
-    # null across 2,247 filings while revenue and profit filled correctly.
-    # Combined rather than continuing-only, because that is the headline EPS the
-    # price is quoted against.
-    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
-    "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
-}
 
 #: Keys the API response must carry. A layout change fails loudly rather than
 #: writing a table of nulls that every factor then reads as "no earnings".
@@ -133,28 +109,6 @@ FILING_SCHEMA: dict[str, pl.DataType] = {
 _DATE = "%d-%b-%Y"
 _DATETIME = "%d-%b-%Y %H:%M:%S"
 _DATETIME_NO_SECONDS = "%d-%b-%Y %H:%M"
-
-#: A revenue above this is a parsing failure, not a company. India's largest
-#: listed revenue is ~10 trillion rupees a year; 100 trillion in one quarter is
-#: two orders of magnitude beyond anything real and indicates a units error.
-IMPLAUSIBLE_ABOVE = Decimal("1e14")
-
-
-class ResultsFormatError(ValueError):
-    """The payload was not what this feed parses. Never guessed at."""
-
-
-@dataclass(frozen=True)
-class XbrlFacts:
-    """One filing's numbers, for the reporting period only."""
-
-    #: Column name -> value, for whatever was present.
-    values: dict[str, Decimal]
-    #: Context id the facts were taken from, kept for provenance.
-    context: str
-
-    def __bool__(self) -> bool:
-        return bool(self.values)
 
 
 def filings_url(from_date: str, to_date: str, period: str = "Quarterly") -> str:
@@ -252,51 +206,6 @@ def parse_filings(payload: bytes) -> pl.DataFrame:
     return pl.DataFrame(built, schema=FILING_SCHEMA).sort(["receive_time", "isin"])
 
 
-def _local_name(tag: object) -> str:
-    """Strip the namespace. Ind-AS documents use several and vary by filer."""
-    text = str(tag)
-    return text.rsplit("}", 1)[-1]
-
-
-def _to_decimal(text: str) -> Decimal | None:
-    try:
-        return Decimal(text.strip().replace(",", ""))
-    except (InvalidOperation, AttributeError):
-        return None
-
-
-def _statement_contexts(root: etree._Element) -> set[str]:
-    """Quarter contexts that carry statement totals rather than breakdowns.
-
-    Two filters, both structural rather than positional:
-
-    *Undimensioned.* A context with a dimension reports one slice — a segment,
-    a product line, an expense category. `OneReportableSegmentRevenue01D` is a
-    real context in a real filing, it starts with `One`, and it holds one
-    business segment's revenue. Selecting the first `One*` fact encountered
-    would record that as the company's, silently, in whatever documents happen
-    to emit segments before totals.
-
-    *Duration, not instant.* Every fact here is a flow over the quarter.
-    Instant contexts (`OneI`) carry balance-sheet positions and would be a
-    different quantity wearing the same tag.
-    """
-    usable: set[str] = set()
-    for element in root.iter():
-        if _local_name(element.tag) != "context":
-            continue
-        context_id = str(element.get("id") or "")
-        if not context_id.startswith(QUARTER_CONTEXT):
-            continue
-        names = {_local_name(node.tag) for node in element.iter()}
-        if "explicitMember" in names or "typedMember" in names:
-            continue
-        if "endDate" not in names or "startDate" not in names:
-            continue
-        usable.add(context_id)
-    return usable
-
-
 def has_xbrl_document(url: str) -> bool:
     """Whether this filing actually links to a document.
 
@@ -315,90 +224,3 @@ def xbrl_document_expr(column: str = "xbrl_url") -> pl.Expr:
     return pl.col(column).str.starts_with("http") & pl.col(column).str.to_lowercase().str.ends_with(
         ".xml"
     )
-
-
-def parse_xbrl(payload: bytes) -> XbrlFacts:
-    """Extract the reporting period's figures from an Ind-AS XBRL document.
-
-    Raises:
-        ResultsFormatError: if the document does not parse, or carries no
-            quarter context.
-
-    **Facts are selected by context id prefix, never by declared period.** The
-    quarter and the year-to-date contexts carry identical start and end dates,
-    so a date-based selection silently returns cumulative figures for a name
-    that filed them in a different order. See the module docstring.
-
-    A document holding only a cumulative context is refused. Its numbers are
-    real, but they are not the quarter's, and a table mixing the two is worse
-    than one missing the name entirely.
-    """
-    # `resolve_entities=False` and `no_network=True`: this parses a document
-    # fetched over the network, and an entity that reads a local file or
-    # re-fetches a URL is a real capability to hand it.
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
-    try:
-        root = etree.fromstring(payload, parser=parser)
-    except etree.XMLSyntaxError as exc:
-        raise ResultsFormatError(f"not parseable XML: {exc}") from exc
-
-    usable = _statement_contexts(root)
-    values: dict[str, Decimal] = {}
-    contexts: set[str] = set()
-    skipped: set[str] = set()
-    chosen = ""
-
-    for element in root.iter():
-        name = _local_name(element.tag)
-        if name not in FUNDAMENTAL_FACTS:
-            continue
-        context = str(element.get("contextRef") or "")
-        contexts.add(context)
-        if context not in usable:
-            continue
-        # Pinned to the first usable context that yields a fact. Measured on 25
-        # real filings, every document has exactly one, so this costs nothing —
-        # but taking facts from two while reporting one context would make the
-        # provenance a claim rather than a record.
-        if chosen and context != chosen:
-            skipped.add(context)
-            continue
-        value = _to_decimal(element.text or "")
-        if value is None:
-            continue
-        chosen = chosen or context
-        values.setdefault(FUNDAMENTAL_FACTS[name], value)
-
-    if not values:
-        cumulative = sorted(c for c in contexts if c.startswith(CUMULATIVE_CONTEXT))
-        if cumulative:
-            raise ResultsFormatError(
-                f"no usable {QUARTER_CONTEXT}* context; document holds only cumulative "
-                f"figures ({', '.join(cumulative)}), which are not this quarter's"
-            )
-        raise ResultsFormatError("document carries none of the expected facts")
-    if skipped:
-        # Never seen in real filings. If it starts happening the taxonomy has
-        # changed shape and the selection needs revisiting, so it is loud.
-        logger.warning(
-            "%s usable contexts in one document; kept %s, ignored %s",
-            len(skipped) + 1,
-            chosen,
-            ", ".join(sorted(skipped)),
-        )
-    return XbrlFacts(values=values, context=chosen)
-
-
-def xbrl_is_plausible(facts: XbrlFacts) -> str:
-    """Why these numbers should be refused, or an empty string.
-
-    A units error in a filing does not look like an error downstream — it looks
-    like a company that grew ten-thousandfold, which is exactly the kind of
-    outlier a ranking factor puts straight at the top.
-    """
-    revenue = facts.values.get("revenue")
-    if revenue is not None and abs(revenue) > IMPLAUSIBLE_ABOVE:
-        return f"revenue {revenue:.0f} is beyond any real company; likely a units error"
-    if revenue is not None and revenue < 0:
-        return f"negative revenue {revenue:.0f}"
-    return ""

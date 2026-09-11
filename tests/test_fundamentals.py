@@ -176,15 +176,21 @@ class TestXbrlContexts:
         assert facts.context == "OneD"
 
     def test_an_instant_context_is_not_used_for_a_flow(self) -> None:
-        """`OneI` carries balance-sheet positions. Every fact here is a flow
-        over the quarter, so an instant would be a different quantity wearing
-        the same tag."""
-        instant_only = XBRL.replace(b'id="OneD"', b'id="OneI"').replace(
-            b'<startDate>2024-10-01</startDate><endDate>2024-12-31</endDate></period>\n  </context>\n  <context id="FourD">',
-            b'<instant>2024-12-31</instant></period>\n  </context>\n  <context id="FourD">',
+        """`OneD` declared as an instant carries a balance-sheet position, not
+        a quarter's flow -- a different quantity wearing the same tag.
+
+        Declared on purpose. An *undeclared* reference is rescued by the
+        malformed-document fallback, and the point here is the structural test:
+        where there is a declaration, it decides.
+        """
+        instant = (
+            b'<?xml version="1.0"?><xbrl xmlns="http://www.xbrl.org/2003/instance">'
+            b'<context id="OneD"><period><instant>2024-12-31</instant></period></context>'
+            b'<RevenueFromOperations contextRef="OneD">2191000000.00</RevenueFromOperations>'
+            b"</xbrl>"
         )
         with pytest.raises(ResultsFormatError):
-            parse_xbrl(instant_only.replace(b'contextRef="OneI"', b'contextRef="OneI"'))
+            parse_xbrl(instant)
 
     def test_every_expected_fact_is_extracted(self) -> None:
         facts = parse_xbrl(XBRL)
@@ -455,3 +461,53 @@ class TestNullPeriodIsRefusedByName:
         )
         with pytest.raises(ValueError, match="no period_end"):
             FundamentalStore(tmp_path).write(frame)
+
+
+class TestUndeclaredContexts:
+    """Filings that reference a context they never declare — §9.
+
+    The XBRL spec does not permit this and NSE published roughly thirty-one
+    thousand of them. Every filing before 2022 was refused on exactly this,
+    which was correct and useless: the structural test asks whether a context
+    is undimensioned and spans a duration, and there is no declaration to ask.
+    """
+
+    MALFORMED = b"""<?xml version="1.0"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance">
+  <context id="OneOperatingExpenses01D">
+    <period><startDate>2020-10-01</startDate><endDate>2020-12-31</endDate></period>
+    <scenario><explicitMember dimension="x:DetailsOfOtherExpensesAxis">a</explicitMember></scenario>
+  </context>
+  <RevenueFromOperations contextRef="OneD">69000.00</RevenueFromOperations>
+  <RevenueFromOperations contextRef="FourD">6006000.00</RevenueFromOperations>
+  <ProfitLossForPeriod contextRef="OneD">4100.00</ProfitLossForPeriod>
+</xbrl>"""
+
+    def test_an_undeclared_quarter_context_is_read(self) -> None:
+        facts = parse_xbrl(self.MALFORMED)
+        assert facts.values["revenue"] == Decimal("69000.00")
+        assert facts.context == "OneD"
+
+    def test_the_cumulative_one_is_still_refused(self) -> None:
+        """Undeclared does not mean unexamined. `FourD` is the year to date
+        and taking it would overstate revenue by a factor of the quarters
+        elapsed — the same trap, arrived at through a different door."""
+        facts = parse_xbrl(self.MALFORMED)
+        assert facts.values["revenue"] != Decimal("6006000.00")
+
+    def test_a_declared_context_still_wins_the_structural_test(self) -> None:
+        """The fallback applies only where there is nothing to inspect. A
+        document that declares its contexts is judged on them."""
+        facts = parse_xbrl(XBRL)
+        assert facts.context == "OneD"
+        assert facts.values["revenue"] == Decimal("2191000000.00")
+
+    def test_a_declared_but_dimensioned_quarter_is_not_rescued(self) -> None:
+        """A segment context is declared, so the fallback never sees it, and
+        the structural test rejects it as it always did."""
+        segmented = self.MALFORMED.replace(
+            b'<RevenueFromOperations contextRef="OneD">69000.00',
+            b'<RevenueFromOperations contextRef="OneOperatingExpenses01D">7.00</RevenueFromOperations>'
+            b'<RevenueFromOperations contextRef="OneD">69000.00',
+        )
+        assert parse_xbrl(segmented).values["revenue"] == Decimal("69000.00")
